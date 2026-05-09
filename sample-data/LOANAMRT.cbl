@@ -1,0 +1,225 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. LOANAMRT.
+       AUTHOR. COBOL-ANALYST.
+       DATE-WRITTEN. 2024-01-15.
+      *----------------------------------------------------------------*
+      * LOAN AMORTISATION SCHEDULE PROGRAM                             *
+      * Calculates monthly payment, builds amortisation schedule,      *
+      * applies 2% early settlement penalty for payoff within          *
+      * first 12 months of loan origination.                           *
+      *----------------------------------------------------------------*
+       ENVIRONMENT DIVISION.
+       CONFIGURATION SECTION.
+       SOURCE-COMPUTER. IBM-MAINFRAME.
+       OBJECT-COMPUTER. IBM-MAINFRAME.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT LOAN-INPUT-FILE ASSIGN TO LOANIN
+               ORGANIZATION IS SEQUENTIAL.
+           SELECT AMORT-REPORT ASSIGN TO AMORTRPT
+               ORGANIZATION IS SEQUENTIAL.
+
+       DATA DIVISION.
+       FILE SECTION.
+       FD  LOAN-INPUT-FILE
+           LABEL RECORDS ARE STANDARD
+           RECORD CONTAINS 80 CHARACTERS.
+       01  LOAN-INPUT-RECORD.
+           05  LI-LOAN-NUMBER     PIC X(10).
+           05  LI-BORROWER-NAME   PIC X(30).
+           05  LI-PRINCIPAL       PIC 9(9)V99.
+           05  LI-ANNUAL-RATE     PIC 9(2)V9(4).
+           05  LI-TERM-MONTHS     PIC 9(3).
+           05  LI-MONTHS-ELAPSED  PIC 9(3).
+           05  LI-SETTLEMENT-FLAG PIC X(1).
+           05  FILLER             PIC X(14).
+
+       FD  AMORT-REPORT
+           LABEL RECORDS ARE OMITTED
+           RECORD CONTAINS 132 CHARACTERS.
+       01  AMORT-RECORD           PIC X(132).
+
+       WORKING-STORAGE SECTION.
+       01  WS-EOF-FLAG            PIC X(1)   VALUE 'N'.
+
+       01  WS-LOAN-DATA.
+           05  WS-LOAN-NUMBER     PIC X(10)  VALUE SPACES.
+           05  WS-BORROWER-NAME   PIC X(30)  VALUE SPACES.
+           05  WS-PRINCIPAL       PIC 9(9)V99 VALUE ZEROS.
+           05  WS-ANNUAL-RATE     PIC 9(2)V9(4) VALUE ZEROS.
+           05  WS-TERM-MONTHS     PIC 9(3)   VALUE ZEROS.
+           05  WS-MONTHS-ELAPSED  PIC 9(3)   VALUE ZEROS.
+           05  WS-SETTLE-FLAG     PIC X(1)   VALUE 'N'.
+
+       01  WS-CALCULATION-WORK.
+           05  WS-MONTHLY-RATE    PIC 9(2)V9(6) VALUE ZEROS.
+           05  WS-MONTHLY-PMT     PIC 9(9)V99 VALUE ZEROS.
+           05  WS-BALANCE         PIC 9(9)V99 VALUE ZEROS.
+           05  WS-INTEREST-PMT    PIC 9(9)V99 VALUE ZEROS.
+           05  WS-PRINCIPAL-PMT   PIC 9(9)V99 VALUE ZEROS.
+           05  WS-TOTAL-INTEREST  PIC 9(11)V99 VALUE ZEROS.
+           05  WS-RATE-FACTOR     PIC 9(4)V9(8) VALUE ZEROS.
+           05  WS-POWER-FACTOR    PIC 9(4)V9(8) VALUE ZEROS.
+           05  WS-NUMERATOR       PIC 9(11)V9(4) VALUE ZEROS.
+           05  WS-DENOMINATOR     PIC 9(11)V9(4) VALUE ZEROS.
+
+       01  WS-SETTLEMENT-WORK.
+           05  WS-SETTLE-PENALTY  PIC 9(9)V99 VALUE ZEROS.
+           05  WS-SETTLE-AMOUNT   PIC 9(9)V99 VALUE ZEROS.
+           05  WS-PENALTY-RATE    PIC V99     VALUE .02.
+           05  WS-EARLY-MONTHS    PIC 9(2)    VALUE 12.
+           05  WS-IS-EARLY        PIC X(1)    VALUE 'N'.
+
+       01  WS-LOOP-COUNTER        PIC 9(3)    VALUE ZEROS.
+
+       01  WS-REPORT-HEADER.
+           05  FILLER             PIC X(10)   VALUE 'LOAN NUM: '.
+           05  WS-HDR-LOAN-NUM    PIC X(10).
+           05  FILLER             PIC X(12)   VALUE '  BORROWER: '.
+           05  WS-HDR-BORROWER    PIC X(30).
+
+       01  WS-AMORT-LINE.
+           05  WS-AL-MONTH        PIC Z(3).
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-AL-PAYMENT      PIC $$$,$$$,ZZ9.99.
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-AL-INTEREST     PIC $$$,$$$,ZZ9.99.
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-AL-PRINCIPAL    PIC $$$,$$$,ZZ9.99.
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-AL-BALANCE      PIC $$,$$$,$$$,ZZ9.99.
+
+       01  WS-CONSTANTS.
+           05  WS-MONTHS-IN-YEAR  PIC 9(2)    VALUE 12.
+
+       PROCEDURE DIVISION.
+       0000-MAIN-CONTROL.
+           PERFORM 1000-INITIALIZE
+           PERFORM 2000-READ-LOAN
+           PERFORM 3000-PROCESS-LOAN
+               UNTIL WS-EOF-FLAG = 'Y'
+           PERFORM 9000-TERMINATE
+           STOP RUN.
+
+       1000-INITIALIZE.
+           OPEN INPUT  LOAN-INPUT-FILE
+           OPEN OUTPUT AMORT-REPORT
+           MOVE 'N' TO WS-EOF-FLAG
+           MOVE SPACES TO AMORT-RECORD
+           MOVE 'LOAN AMORTISATION SCHEDULES' TO AMORT-RECORD
+           WRITE AMORT-RECORD.
+
+       2000-READ-LOAN.
+           READ LOAN-INPUT-FILE INTO LOAN-INPUT-RECORD
+               AT END MOVE 'Y' TO WS-EOF-FLAG
+           END-READ.
+
+       3000-PROCESS-LOAN.
+           MOVE LI-LOAN-NUMBER    TO WS-LOAN-NUMBER
+           MOVE LI-BORROWER-NAME  TO WS-BORROWER-NAME
+           MOVE LI-PRINCIPAL      TO WS-PRINCIPAL
+           MOVE LI-ANNUAL-RATE    TO WS-ANNUAL-RATE
+           MOVE LI-TERM-MONTHS    TO WS-TERM-MONTHS
+           MOVE LI-MONTHS-ELAPSED TO WS-MONTHS-ELAPSED
+           MOVE LI-SETTLEMENT-FLAG TO WS-SETTLE-FLAG
+           PERFORM 3100-PRINT-LOAN-HEADER
+           PERFORM 3200-CALCULATE-MONTHLY-RATE
+           PERFORM 3300-CALCULATE-MONTHLY-PAYMENT
+           IF WS-SETTLE-FLAG = 'Y'
+               PERFORM 3400-CALCULATE-SETTLEMENT
+           ELSE
+               PERFORM 3500-BUILD-AMORT-SCHEDULE
+           END-IF
+           PERFORM 2000-READ-LOAN.
+
+       3100-PRINT-LOAN-HEADER.
+           MOVE SPACES TO AMORT-RECORD
+           WRITE AMORT-RECORD
+           MOVE WS-LOAN-NUMBER  TO WS-HDR-LOAN-NUM
+           MOVE WS-BORROWER-NAME TO WS-HDR-BORROWER
+           MOVE WS-REPORT-HEADER TO AMORT-RECORD
+           WRITE AMORT-RECORD
+           MOVE SPACES TO AMORT-RECORD
+           MOVE '  MO  PAYMENT       INTEREST     PRINCIPAL    BALANCE'
+               TO AMORT-RECORD
+           WRITE AMORT-RECORD.
+
+       3200-CALCULATE-MONTHLY-RATE.
+           DIVIDE WS-MONTHS-IN-YEAR INTO WS-ANNUAL-RATE
+               GIVING WS-MONTHLY-RATE.
+
+       3300-CALCULATE-MONTHLY-PAYMENT.
+      *    PMT = P * r / (1 - (1 + r)^-n)  approximated iteratively
+           MOVE WS-PRINCIPAL TO WS-BALANCE
+           MOVE ZEROS TO WS-TOTAL-INTEREST
+           COMPUTE WS-RATE-FACTOR = 1 + WS-MONTHLY-RATE
+           COMPUTE WS-POWER-FACTOR =
+               WS-RATE-FACTOR ** WS-TERM-MONTHS
+           COMPUTE WS-NUMERATOR =
+               WS-PRINCIPAL * WS-MONTHLY-RATE * WS-POWER-FACTOR
+           COMPUTE WS-DENOMINATOR = WS-POWER-FACTOR - 1
+           IF WS-DENOMINATOR > ZEROS
+               DIVIDE WS-DENOMINATOR INTO WS-NUMERATOR
+                   GIVING WS-MONTHLY-PMT ROUNDED
+           ELSE
+               DIVIDE WS-TERM-MONTHS INTO WS-PRINCIPAL
+                   GIVING WS-MONTHLY-PMT ROUNDED
+           END-IF.
+
+       3400-CALCULATE-SETTLEMENT.
+           MOVE 'N' TO WS-IS-EARLY
+           IF WS-MONTHS-ELAPSED <= WS-EARLY-MONTHS
+               MOVE 'Y' TO WS-IS-EARLY
+           END-IF
+           MOVE WS-BALANCE TO WS-SETTLE-AMOUNT
+           EVALUATE WS-IS-EARLY
+               WHEN 'Y'
+                   MULTIPLY WS-BALANCE BY WS-PENALTY-RATE
+                       GIVING WS-SETTLE-PENALTY
+                   ADD WS-SETTLE-PENALTY TO WS-SETTLE-AMOUNT
+                   MOVE SPACES TO AMORT-RECORD
+                   STRING 'EARLY SETTLEMENT - BALANCE: '
+                       WS-BALANCE
+                       ' PENALTY (2%): ' WS-SETTLE-PENALTY
+                       ' TOTAL DUE: ' WS-SETTLE-AMOUNT
+                       DELIMITED BY SIZE INTO AMORT-RECORD
+                   WRITE AMORT-RECORD
+               WHEN 'N'
+                   MOVE SPACES TO AMORT-RECORD
+                   STRING 'SETTLEMENT - BALANCE DUE: '
+                       WS-SETTLE-AMOUNT
+                       ' (NO PENALTY APPLIES)'
+                       DELIMITED BY SIZE INTO AMORT-RECORD
+                   WRITE AMORT-RECORD
+           END-EVALUATE.
+
+       3500-BUILD-AMORT-SCHEDULE.
+           MOVE WS-PRINCIPAL TO WS-BALANCE
+           MOVE ZEROS TO WS-TOTAL-INTEREST
+           PERFORM VARYING WS-LOOP-COUNTER FROM 1 BY 1
+               UNTIL WS-LOOP-COUNTER > WS-TERM-MONTHS
+               COMPUTE WS-INTEREST-PMT =
+                   WS-BALANCE * WS-MONTHLY-RATE
+               SUBTRACT WS-INTEREST-PMT FROM WS-MONTHLY-PMT
+                   GIVING WS-PRINCIPAL-PMT
+               IF WS-PRINCIPAL-PMT > WS-BALANCE
+                   MOVE WS-BALANCE TO WS-PRINCIPAL-PMT
+               END-IF
+               SUBTRACT WS-PRINCIPAL-PMT FROM WS-BALANCE
+               ADD WS-INTEREST-PMT TO WS-TOTAL-INTEREST
+               MOVE WS-LOOP-COUNTER TO WS-AL-MONTH
+               MOVE WS-MONTHLY-PMT  TO WS-AL-PAYMENT
+               MOVE WS-INTEREST-PMT TO WS-AL-INTEREST
+               MOVE WS-PRINCIPAL-PMT TO WS-AL-PRINCIPAL
+               MOVE WS-BALANCE      TO WS-AL-BALANCE
+               MOVE WS-AMORT-LINE   TO AMORT-RECORD
+               WRITE AMORT-RECORD
+           END-PERFORM
+           MOVE SPACES TO AMORT-RECORD
+           STRING 'TOTAL INTEREST PAID: ' WS-TOTAL-INTEREST
+               DELIMITED BY SIZE INTO AMORT-RECORD
+           WRITE AMORT-RECORD.
+
+       9000-TERMINATE.
+           CLOSE LOAN-INPUT-FILE
+           CLOSE AMORT-REPORT.

@@ -1,0 +1,136 @@
+@page "/generate"
+@rendermode InteractiveServer
+@inject SessionStore SessionStore
+@inject CSharpScaffoldGenerator Generator
+@inject IJSRuntime JS
+
+<PageTitle>CobolAnalyst — Generate</PageTitle>
+
+<div class="panel" style="height:calc(100vh - 52px);">
+    <div class="page-header">C# Scaffold Generation</div>
+
+    @if (_loading)
+    {
+        <p style="color:var(--text-secondary);">Loading session…</p>
+    }
+    else if (_session is null)
+    {
+        <div class="empty-state">
+            <h3>No session loaded</h3>
+            <p>Load a session from the <a href="/sessions">Sessions page</a> or run an analysis first.</p>
+        </div>
+    }
+    else
+    {
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <div>
+                <strong>@_session.Name</strong>
+                <span style="color:var(--text-secondary);margin-left:8px;">
+                    @_session.AcceptedCount accepted rules ready to scaffold
+                </span>
+            </div>
+            <button class="btn btn-primary btn-sm" @onclick="RunGeneration"
+                    disabled="@(_session.AcceptedCount == 0 || _generating)">
+                @(_generating ? "Generating…" : "Generate Scaffold")
+            </button>
+        </div>
+
+        @if (_result is not null)
+        {
+            <div style="display:flex;gap:10px;align-items:center;">
+                <span style="color:var(--text-secondary);font-size:13px;">
+                    Generated @_result.Files.Count file@(_result.Files.Count != 1 ? "s" : "")
+                    from @_result.RuleCount rule@(_result.RuleCount != 1 ? "s" : "") &mdash;
+                    written to <code style="font-size:11px;">@_result.OutputDirectory</code>
+                </span>
+            </div>
+
+            @if (_result.ValidationErrors.Count > 0)
+            {
+                <div class="error-msg">
+                    <strong>Syntax warnings:</strong>
+                    <ul style="margin:6px 0 0 16px;">
+                        @foreach (var err in _result.ValidationErrors)
+                        {
+                            <li>@err</li>
+                        }
+                    </ul>
+                </div>
+            }
+
+            <div class="generated-files">
+                @foreach (var (fileName, content) in _result.Files)
+                {
+                    <div class="generated-file">
+                        <div class="generated-file-header">
+                            <span>@fileName</span>
+                            <button class="btn btn-sm" @onclick="() => CopyToClipboard(content)">
+                                Copy
+                            </button>
+                        </div>
+                        <pre><code>@content</code></pre>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (_errorMessage is not null)
+        {
+            <div class="error-msg">@_errorMessage</div>
+        }
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery] private string? Session { get; set; }
+
+    private AnalysisSession? _session;
+    private GenerationResult? _result;
+    private bool _loading = true;
+    private bool _generating;
+    private string? _errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!string.IsNullOrEmpty(Session))
+        {
+            try
+            {
+                _session = await SessionStore.LoadAsync(Session);
+            }
+            catch (Exception ex)
+            {
+                _errorMessage = $"Could not load session: {ex.Message}";
+            }
+        }
+        _loading = false;
+    }
+
+    private async Task RunGeneration()
+    {
+        if (_session is null) return;
+        _generating = true;
+        _errorMessage = null;
+        _result = null;
+        StateHasChanged();
+
+        try
+        {
+            _result = await Generator.GenerateAsync(_session);
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Generation failed: {ex.Message}";
+        }
+        finally
+        {
+            _generating = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CopyToClipboard(string text)
+    {
+        await JS.InvokeVoidAsync("copyToClipboard", text);
+    }
+}

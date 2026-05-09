@@ -1,0 +1,22 @@
+@inherits LayoutComponentBase
+
+<nav class="topnav">
+    <span class="topnav-brand">CobolAnalyst</span>
+    <div class="topnav-links">
+        <NavLink href="/" Match="NavLinkMatch.All">Analyst</NavLink>
+        <NavLink href="/sessions">Sessions</NavLink>
+        <NavLink href="/generate">Generate</NavLink>
+        <NavLink href="/accuracy">Accuracy</NavLink>
+        <NavLink href="/workshop">Workshop</NavLink>
+    </div>
+</nav>
+
+<main class="main-content">
+    @Body
+</main>
+
+<div id="blazor-error-ui">
+    An unhandled error has occurred.
+    <a href="" class="reload">Reload</a>
+    <span class="dismiss">&#x2715;</span>
+</div>

@@ -1,0 +1,86 @@
+@page "/sessions"
+@rendermode InteractiveServer
+@inject SessionStore SessionStore
+@inject NavigationManager Nav
+
+<PageTitle>CobolAnalyst — Sessions</PageTitle>
+
+<div class="panel" style="height:calc(100vh - 52px);">
+    <div class="page-header">Saved Sessions</div>
+
+    @if (_loading)
+    {
+        <p style="color:var(--text-secondary);">Loading…</p>
+    }
+    else if (_sessions.Count == 0)
+    {
+        <div class="empty-state">
+            <h3>No sessions yet</h3>
+            <p>Run an analysis on the <a href="/">Analyst page</a> to create a session.</p>
+        </div>
+    }
+    else
+    {
+        <table class="sessions-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Created</th>
+                    <th>Files</th>
+                    <th>Rules</th>
+                    <th>Progress</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var s in _sessions)
+                {
+                    <tr>
+                        <td>@s.Name</td>
+                        <td>@s.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</td>
+                        <td>@s.FileCount</td>
+                        <td>@s.RuleCount</td>
+                        <td>@s.DecisionProgress decided</td>
+                        <td>
+                            <button class="btn btn-sm" @onclick="() => LoadSession(s.Id)">
+                                Load
+                            </button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    @if (_errorMessage is not null)
+    {
+        <div class="error-msg">@_errorMessage</div>
+    }
+</div>
+
+@code {
+    private List<SessionSummary> _sessions = [];
+    private bool _loading = true;
+    private string? _errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _sessions = await SessionStore.ListAsync();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Could not load sessions: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void LoadSession(string id)
+    {
+        Nav.NavigateTo($"/generate?session={id}");
+    }
+}

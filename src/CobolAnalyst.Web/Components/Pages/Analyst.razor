@@ -1,0 +1,610 @@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@using CobolAnalyst.Web.Core.Cache
+@using CobolAnalyst.Web.Core.Prompts
+@inject ICobolChunker Chunker
+@inject IAnalysisOrchestrator Orchestrator
+@inject ILlmClient LlmClient
+@inject SessionStore Sessions
+@inject KnowledgeBaseService KnowledgeBase
+@inject PromptTemplateStore TemplateStore
+@inject IJSRuntime JS
+
+<PageTitle>CobolAnalyst — Analyst</PageTitle>
+
+<div class="analyst-layout">
+
+    <!-- ── Sidebar ── -->
+    <aside class="sidebar">
+        <div class="sidebar-section">
+            <span class="sidebar-label">Files</span>
+            <label class="upload-zone @(_dragging ? "drag-over" : "")"
+                   @ondragover:preventDefault="true"
+                   @ondragover="() => _dragging = true"
+                   @ondragleave="() => _dragging = false"
+                   @ondrop="HandleDrop"
+                   @ondrop:preventDefault="true">
+                <InputFile OnChange="HandleFileSelected" multiple accept=".cbl,.cob,.cpy,.vb,.bas,.cls,.frm,.vbs" />
+                Drop source files here<br />
+                <small>.cbl .cob .cpy &nbsp;|&nbsp; .vb .bas .cls .frm</small>
+                <small style="display:block;margin-top:2px;">(max 500 KB each)</small>
+            </label>
+
+            @if (_stagedPaths.Count > 0)
+            {
+                <ul class="file-list">
+                    @foreach (var (path, err) in _stagedPaths)
+                    {
+                        <li class="file-item">
+                            <span class="file-name" title="@path">@Path.GetFileName(path)</span>
+                            <span class="file-meta">@FormatSize(new FileInfo(path).Length)</span>
+                            @if (err is not null)
+                            {
+                                <span class="file-error">@err</span>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <div class="sidebar-section">
+            <span class="sidebar-label">Model</span>
+            @if (_availableModels.Count > 0)
+            {
+                <select class="model-select" value="@_selectedModel"
+                        @onchange="OnModelChanged" disabled="@_analysing">
+                    @foreach (var m in _availableModels)
+                    {
+                        <option value="@m" selected="@(m == _selectedModel)">@m</option>
+                    }
+                </select>
+            }
+            else if (_loadingModels)
+            {
+                <span class="kb-stats">Loading models…</span>
+            }
+            else
+            {
+                <span class="kb-stats" style="color:var(--accent-red);">
+                    Ollama not reachable — start <code>ollama serve</code>
+                </span>
+            }
+        </div>
+
+        <div class="sidebar-section">
+            <span class="sidebar-label">Session</span>
+            <input class="session-name-input" placeholder="Session name…"
+                   @bind="_sessionName" @bind:event="oninput" disabled="@_analysing" />
+        </div>
+
+        <div class="sidebar-section">
+            <button class="btn btn-primary" @onclick="StartAnalysis"
+                    disabled="@(!CanAnalyse)">
+                @(_analysing ? "Analysing…" : "Analyse")
+            </button>
+            <button class="btn" @onclick="ToggleQueryPanel"
+                    disabled="@(_session is null || _analysing)">
+                Query Rules
+            </button>
+            <button class="btn" @onclick="NavigateToGenerate"
+                    disabled="@(_session is null)">
+                Generate C# Scaffold
+            </button>
+            <button class="btn btn-danger" @onclick="ClearSession"
+                    disabled="@_analysing">
+                Clear Session
+            </button>
+        </div>
+
+        <div class="sidebar-section">
+            <span class="sidebar-label">Knowledge Base</span>
+            <div class="kb-stats">
+                <strong>@KnowledgeBase.EntryCount</strong> entries
+                @if (KnowledgeBase.LastUpdated.HasValue)
+                {
+                    <br /><small>Last updated @KnowledgeBase.LastUpdated.Value.ToString("yyyy-MM-dd HH:mm") UTC</small>
+                }
+            </div>
+            <button class="btn btn-sm" @onclick="ClearKnowledgeBase">Clear KB</button>
+        </div>
+
+        @if (_globalError is not null)
+        {
+            <div class="error-msg">@_globalError</div>
+        }
+    </aside>
+
+    <!-- ── Main panel ── -->
+    <section class="panel">
+
+        @if (_session is null && _stagedPaths.Count == 0)
+        {
+            <div class="empty-state">
+                <h3>COBOL Analyst</h3>
+                <p>Drop COBOL source files into the sidebar to begin.</p>
+            </div>
+        }
+
+        @if (_stagedPaths.Count > 0 && _session is null && !_analysing)
+        {
+            <div>
+                <div class="page-header">Staged Files</div>
+                <div class="file-tree" style="margin-top:12px;">
+                    @foreach (var (path, _) in _stagedPaths)
+                    {
+                        var info = new FileInfo(path);
+                        <div class="file-tree-item">
+                            <span class="ft-name">@info.Name</span>
+                            <span class="ft-meta">@FormatSize(info.Length)</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @if (_analysing || _progressRows.Count > 0)
+        {
+            <div>
+                <div class="page-header" style="display:flex;align-items:baseline;gap:12px;">
+                    Analysis Progress
+                    @if (!string.IsNullOrEmpty(_activeModel))
+                    {
+                        <span style="font-size:12px;font-weight:400;color:var(--text-secondary);">
+                            via @_activeModel
+                        </span>
+                    }
+                    @if (!string.IsNullOrEmpty(_elapsedDisplay))
+                    {
+                        <span class="elapsed-timer @(_analysing ? "elapsed-running" : "elapsed-done")">
+                            &#x23F1; @_elapsedDisplay
+                        </span>
+                    }
+                </div>
+                <div class="progress-list" style="margin-top:12px;">
+                    @foreach (var row in _progressRows)
+                    {
+                        <div class="progress-row">
+                            <span class="pr-label">@row.ChunkLabel</span>
+                            @switch (row.Status)
+                            {
+                                case ChunkStatus.Queued:
+                                    <span class="pr-status queued">Queued</span>
+                                    break;
+                                case ChunkStatus.Running:
+                                    <span class="pr-status running"><span class="spinner"></span> Running</span>
+                                    break;
+                                case ChunkStatus.Complete:
+                                    <span class="pr-status complete">&#x2713; @row.RulesFound rule@(row.RulesFound != 1 ? "s" : "")</span>
+                                    break;
+                                case ChunkStatus.Failed:
+                                    <span class="pr-status failed">&#x2717; @row.ErrorMessage</span>
+                                    break;
+                            }
+                            <span style="font-size:11px;color:var(--text-secondary);">@((row.ElapsedMs / 1000.0).ToString("F1"))s</span>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @if (_session is not null)
+        {
+            <!-- Summary bar -->
+            <div class="summary-bar">
+                <div class="sb-item sb-accepted">
+                    <span class="sb-count">@_session.AcceptedCount</span> Accepted
+                </div>
+                <div class="sb-item sb-rejected">
+                    <span class="sb-count">@_session.RejectedCount</span> Rejected
+                </div>
+                <div class="sb-item sb-flagged">
+                    <span class="sb-count">@_session.FlaggedCount</span> Flagged
+                </div>
+                <div class="sb-item sb-pending">
+                    <span class="sb-count">@_session.PendingCount</span> Pending
+                </div>
+                <div style="margin-left:auto;font-size:12px;color:var(--text-secondary);">
+                    @_session.Rules.Count total &bull; @_session.ModelUsed
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="filter-bar">
+                <select @bind="_filterType">
+                    <option value="">All types</option>
+                    @foreach (var t in Enum.GetValues<RuleType>())
+                    {
+                        <option value="@t">@t</option>
+                    }
+                </select>
+                <select @bind="_filterFile">
+                    <option value="">All files</option>
+                    @foreach (var f in _session.Files)
+                    {
+                        <option value="@f.FileName">@f.FileName</option>
+                    }
+                </select>
+                <select @bind="_filterConfidence">
+                    <option value="">All confidence</option>
+                    @foreach (var c in Enum.GetValues<ConfidenceLevel>())
+                    {
+                        <option value="@c">@c</option>
+                    }
+                </select>
+                <select @bind="_filterDecision">
+                    <option value="">All decisions</option>
+                    @foreach (var d in Enum.GetValues<ReviewDecision>())
+                    {
+                        <option value="@d">@d</option>
+                    }
+                </select>
+            </div>
+
+            <!-- Rule cards -->
+            <div class="rule-cards">
+                @foreach (var rule in FilteredRules)
+                {
+                    var decisionClass = rule.Decision switch
+                    {
+                        ReviewDecision.Accepted => "accepted",
+                        ReviewDecision.Rejected => "rejected",
+                        ReviewDecision.Flagged  => "flagged",
+                        _                       => ""
+                    };
+
+                    <div class="rule-card @decisionClass">
+                        <div class="rule-card-header">
+                            <span class="rule-label">@rule.Label</span>
+                            <span class="badge badge-@rule.Type">@rule.Type</span>
+                            <span class="badge badge-@rule.Confidence">@rule.Confidence</span>
+                            @if (rule.IsCrossCutting)
+                            {
+                                <span class="badge badge-cross-cutting">Cross-cutting</span>
+                            }
+                        </div>
+                        <p class="rule-description">@rule.Description</p>
+                        <div class="rule-reference">@rule.CobolReference &mdash; @rule.SourceFile</div>
+                        @if (!string.IsNullOrWhiteSpace(rule.MigrationNotes))
+                        {
+                            <div class="rule-migration">Migration: @rule.MigrationNotes</div>
+                        }
+                        <div class="rule-actions">
+                            <button class="btn btn-sm btn-accept @(rule.Decision == ReviewDecision.Accepted ? "active" : "")"
+                                    @onclick="() => SetDecision(rule, ReviewDecision.Accepted)">
+                                Accept
+                            </button>
+                            <button class="btn btn-sm btn-reject @(rule.Decision == ReviewDecision.Rejected ? "active" : "")"
+                                    @onclick="() => SetDecision(rule, ReviewDecision.Rejected)">
+                                Reject
+                            </button>
+                            <button class="btn btn-sm btn-flag @(rule.Decision == ReviewDecision.Flagged ? "active" : "")"
+                                    @onclick="() => SetDecision(rule, ReviewDecision.Flagged)">
+                                Flag
+                            </button>
+                        </div>
+                    </div>
+                }
+
+                @if (!FilteredRules.Any())
+                {
+                    <div class="empty-state">
+                        <p>No rules match the current filters.</p>
+                    </div>
+                }
+            </div>
+
+            <!-- Query panel -->
+            @if (_showQuery)
+            {
+                <div class="query-panel">
+                    <div class="page-header">Query Rules</div>
+                    <div class="query-input-row">
+                        <input class="query-input" placeholder="e.g. which rules handle tax calculations?"
+                               @bind="_queryText" @bind:event="oninput"
+                               @onkeydown="HandleQueryKey" disabled="@_querying" />
+                        @if (_querying)
+                        {
+                            <button class="btn btn-sm btn-danger" @onclick="CancelQuery">Cancel</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn-primary btn-sm" @onclick="RunQuery"
+                                    disabled="@string.IsNullOrWhiteSpace(_queryText)">
+                                Ask
+                            </button>
+                        }
+                    </div>
+                    @if (_queryResult.Length > 0)
+                    {
+                        <div class="query-result">@_queryResult</div>
+                    }
+                </div>
+            }
+        }
+    </section>
+</div>
+
+@code {
+    [Inject] private NavigationManager Nav { get; set; } = default!;
+
+    // Model selection
+    private List<string> _availableModels = [];
+    private string _selectedModel = "";
+    private bool _loadingModels = true;
+
+    // Elapsed timer
+    private PeriodicTimer? _ticker;
+    private string _elapsedDisplay = "";
+
+    // State
+    private List<(string Path, string? Error)> _stagedPaths = [];
+    private AnalysisSession? _session;
+    private string _sessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
+    private bool _analysing;
+    private bool _dragging;
+    private string? _globalError;
+    private string _activeModel = "";
+    private CancellationTokenSource? _cts;
+
+    // Progress
+    private List<AnalysisProgressEvent> _progressRows = [];
+
+    // Filters
+    private string _filterType = "";
+    private string _filterFile = "";
+    private string _filterConfidence = "";
+    private string _filterDecision = "";
+
+    // Query
+    private bool _showQuery;
+    private string _queryText = "";
+    private string _queryResult = "";
+    private bool _querying;
+    private CancellationTokenSource? _queryCts;
+
+    private bool CanAnalyse =>
+        _stagedPaths.Count > 0 &&
+        !_stagedPaths.Any(p => p.Error is not null) &&
+        !_analysing &&
+        !string.IsNullOrEmpty(_selectedModel);
+
+    private IEnumerable<ExtractedRule> FilteredRules => _session is null
+        ? []
+        : _session.Rules
+            .Where(r => string.IsNullOrEmpty(_filterType) || r.Type.ToString() == _filterType)
+            .Where(r => string.IsNullOrEmpty(_filterFile) || r.SourceFile == _filterFile)
+            .Where(r => string.IsNullOrEmpty(_filterConfidence) || r.Confidence.ToString() == _filterConfidence)
+            .Where(r => string.IsNullOrEmpty(_filterDecision) || r.Decision.ToString() == _filterDecision);
+
+    protected override async Task OnInitializedAsync()
+    {
+        _selectedModel = LlmClient.SelectedModel;
+        _availableModels = [.. await LlmClient.GetAvailableModelsAsync()];
+        _loadingModels = false;
+
+        // If the configured default isn't in the list, pick the first available
+        if (_availableModels.Count > 0 && !_availableModels.Contains(_selectedModel))
+        {
+            _selectedModel = _availableModels[0];
+            LlmClient.SelectedModel = _selectedModel;
+        }
+    }
+
+    private void OnModelChanged(ChangeEventArgs e)
+    {
+        _selectedModel = e.Value?.ToString() ?? _selectedModel;
+        LlmClient.SelectedModel = _selectedModel;
+    }
+
+    private async Task HandleFileSelected(InputFileChangeEventArgs e)
+    {
+        _globalError = null;
+        foreach (var file in e.GetMultipleFiles(20))
+        {
+            var tmpPath = Path.Combine(Path.GetTempPath(), file.Name);
+            try
+            {
+                await using var fs = new FileStream(tmpPath, FileMode.Create);
+                await file.OpenReadStream(maxAllowedSize: 500 * 1024).CopyToAsync(fs);
+                _stagedPaths.Add((tmpPath, null));
+            }
+            catch (Exception ex)
+            {
+                _stagedPaths.Add((tmpPath, ex.Message));
+            }
+        }
+        StateHasChanged();
+    }
+
+    private void HandleDrop(DragEventArgs e) => _dragging = false;
+
+    private async Task StartAnalysis()
+    {
+        _globalError = null;
+        _analysing = true;
+        _progressRows = [];
+        _session = null;
+        _activeModel = _selectedModel;
+        _elapsedDisplay = "0:00";
+
+        // Cancel and replace any leftover CTS from a previous run.
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+
+        _ = RunElapsedTimerAsync(DateTime.UtcNow, _cts.Token);
+
+        try
+        {
+            var paths = _stagedPaths.Where(p => p.Error is null).Select(p => p.Path).ToList();
+            var (files, chunks) = await Chunker.ChunkFilesAsync(paths, _cts.Token);
+
+            var progress = new Progress<AnalysisProgressEvent>(evt =>
+            {
+                var existing = _progressRows.FindIndex(r => r.ChunkLabel == evt.ChunkLabel);
+                if (existing >= 0)
+                    _progressRows[existing] = evt;
+                else
+                    _progressRows.Add(evt);
+                InvokeAsync(StateHasChanged);
+            });
+
+            var rules = await Orchestrator.AnalyseAsync(chunks, progress, _cts.Token);
+
+            var activeTemplate = TemplateStore.GetActive();
+            _session = new AnalysisSession
+            {
+                Name = _sessionName,
+                ModelUsed = _activeModel,
+                Files = files,
+                Chunks = chunks,
+                Rules = rules,
+                PromptTemplateId   = activeTemplate?.Id,
+                PromptTemplateName = activeTemplate?.Name
+            };
+
+            await Sessions.SaveAsync(_session);
+        }
+        catch (OperationCanceledException)
+        {
+            _globalError = "Analysis cancelled.";
+        }
+        catch (Exception ex)
+        {
+            _globalError = $"Analysis failed: {ex.Message}";
+        }
+        finally
+        {
+            _analysing = false;
+            // Cancel the CTS to stop the elapsed timer task.
+            _cts?.Cancel();
+            StateHasChanged();
+        }
+    }
+
+    private async Task SetDecision(ExtractedRule rule, ReviewDecision decision)
+    {
+        rule.Decision = decision == rule.Decision ? ReviewDecision.Pending : decision;
+        rule.DecidedAt = DateTime.UtcNow;
+
+        if (rule.Decision == ReviewDecision.Accepted && rule.Confidence == ConfidenceLevel.High)
+            KnowledgeBase.AddRule(rule);
+
+        if (_session is not null)
+            await Sessions.SaveAsync(_session);
+
+        StateHasChanged();
+    }
+
+    private void ToggleQueryPanel() => _showQuery = !_showQuery;
+
+    private async Task RunQuery()
+    {
+        if (_session is null || string.IsNullOrWhiteSpace(_queryText)) return;
+
+        _queryCts?.Cancel();
+        _queryCts?.Dispose();
+        _queryCts = new CancellationTokenSource();
+
+        _querying = true;
+        _queryResult = "";
+        StateHasChanged();
+
+        try
+        {
+            var prompt = PromptBuilder.BuildQueryPrompt(_queryText, _session.Rules);
+            await foreach (var token in LlmClient.StreamCompletionAsync(prompt, _queryCts.Token))
+            {
+                _queryResult += token;
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (_queryResult.Length == 0)
+                _queryResult = "(cancelled)";
+        }
+        catch (Exception ex)
+        {
+            _queryResult = $"Query error: {ex.Message}";
+        }
+        finally
+        {
+            _querying = false;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelQuery()
+    {
+        _queryCts?.Cancel();
+    }
+
+    private async Task HandleQueryKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await RunQuery();
+    }
+
+    private void NavigateToGenerate()
+    {
+        if (_session is not null)
+            Nav.NavigateTo($"/generate?session={_session.Id}");
+    }
+
+    private void ClearSession()
+    {
+        _cts?.Cancel();
+        _session = null;
+        _stagedPaths = [];
+        _progressRows = [];
+        _queryText = "";
+        _queryResult = "";
+        _showQuery = false;
+        _globalError = null;
+        _sessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
+        StateHasChanged();
+    }
+
+    private void ClearKnowledgeBase()
+    {
+        KnowledgeBase.Clear();
+        StateHasChanged();
+    }
+
+    private async Task RunElapsedTimerAsync(DateTime start, CancellationToken ct)
+    {
+        _ticker?.Dispose();
+        _ticker = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await _ticker.WaitForNextTickAsync(ct))
+            {
+                var elapsed = DateTime.UtcNow - start;
+                _elapsedDisplay = $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:D2}";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            _ticker?.Dispose();
+            _ticker = null;
+        }
+    }
+
+    public void Dispose()
+    {
+        _ticker?.Dispose();
+        _cts?.Cancel();
+        _cts?.Dispose();
+        _queryCts?.Cancel();
+        _queryCts?.Dispose();
+    }
+
+    private static string FormatSize(long bytes) =>
+        bytes < 1024 ? $"{bytes} B"
+        : bytes < 1024 * 1024 ? $"{bytes / 1024.0:F1} KB"
+        : $"{bytes / 1024.0 / 1024.0:F1} MB";
+}

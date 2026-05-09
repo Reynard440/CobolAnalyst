@@ -1,0 +1,17 @@
+## Build output
+bin/
+obj/
+
+## Data (local-only storage — sessions, cache, generated files)
+**/data/
+
+## Visual Studio
+.vs/
+*.user
+
+## JetBrains Rider
+.idea/
+
+## OS
+.DS_Store
+Thumbs.db

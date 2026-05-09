@@ -1,0 +1,25 @@
+@page "/Error"
+@using System.Diagnostics
+
+<PageTitle>Error</PageTitle>
+
+<div class="panel" style="padding:40px;">
+    <div class="error-msg">
+        <strong>An unhandled error occurred.</strong>
+        @if (ShowRequestId)
+        {
+            <p style="margin-top:8px;">Request ID: <code>@RequestId</code></p>
+        }
+    </div>
+</div>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

@@ -1,0 +1,220 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PAYROLL.
+       AUTHOR. COBOL-ANALYST.
+       DATE-WRITTEN. 2024-01-15.
+      *----------------------------------------------------------------*
+      * WEEKLY PAYROLL CALCULATION PROGRAM                             *
+      * Computes gross pay, applies tax brackets, calculates           *
+      * overtime at time-and-a-half over 40 hours, applies health      *
+      * and pension deductions, and outputs net pay.                   *
+      *----------------------------------------------------------------*
+       ENVIRONMENT DIVISION.
+       CONFIGURATION SECTION.
+       SOURCE-COMPUTER. IBM-MAINFRAME.
+       OBJECT-COMPUTER. IBM-MAINFRAME.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT EMPLOYEE-FILE ASSIGN TO EMPFILE
+               ORGANIZATION IS SEQUENTIAL.
+           SELECT PAYROLL-REPORT ASSIGN TO PAYRPT
+               ORGANIZATION IS SEQUENTIAL.
+
+       DATA DIVISION.
+       FILE SECTION.
+       FD  EMPLOYEE-FILE
+           LABEL RECORDS ARE STANDARD
+           RECORD CONTAINS 80 CHARACTERS.
+       01  EMPLOYEE-RECORD.
+           05  ER-EMP-ID          PIC 9(6).
+           05  ER-EMP-NAME        PIC X(30).
+           05  ER-HOURLY-RATE     PIC 9(4)V99.
+           05  ER-HOURS-WORKED    PIC 9(3)V9.
+           05  ER-HEALTH-FLAG     PIC X(1).
+           05  ER-PENSION-FLAG    PIC X(1).
+           05  FILLER             PIC X(31).
+
+       FD  PAYROLL-REPORT
+           LABEL RECORDS ARE OMITTED
+           RECORD CONTAINS 132 CHARACTERS.
+       01  REPORT-RECORD          PIC X(132).
+
+       WORKING-STORAGE SECTION.
+       01  WS-FLAGS.
+           05  WS-EOF-FLAG        PIC X(1)   VALUE 'N'.
+           05  WS-ERROR-FLAG      PIC X(1)   VALUE 'N'.
+
+       01  WS-EMPLOYEE-WORK.
+           05  WS-EMP-ID          PIC 9(6)   VALUE ZEROS.
+           05  WS-EMP-NAME        PIC X(30)  VALUE SPACES.
+           05  WS-HOURLY-RATE     PIC 9(4)V99 VALUE ZEROS.
+           05  WS-HOURS-WORKED    PIC 9(3)V9  VALUE ZEROS.
+           05  WS-REGULAR-HOURS   PIC 9(3)V9  VALUE ZEROS.
+           05  WS-OVERTIME-HOURS  PIC 9(3)V9  VALUE ZEROS.
+
+       01  WS-PAY-CALCULATIONS.
+           05  WS-REGULAR-PAY     PIC 9(7)V99 VALUE ZEROS.
+           05  WS-OVERTIME-PAY    PIC 9(7)V99 VALUE ZEROS.
+           05  WS-GROSS-PAY       PIC 9(7)V99 VALUE ZEROS.
+           05  WS-TAXABLE-INCOME  PIC 9(7)V99 VALUE ZEROS.
+           05  WS-TAX-AMOUNT      PIC 9(7)V99 VALUE ZEROS.
+           05  WS-HEALTH-DED      PIC 9(5)V99 VALUE ZEROS.
+           05  WS-PENSION-DED     PIC 9(5)V99 VALUE ZEROS.
+           05  WS-TOTAL-DEDUCT    PIC 9(7)V99 VALUE ZEROS.
+           05  WS-NET-PAY         PIC 9(7)V99 VALUE ZEROS.
+
+       01  WS-TAX-CONSTANTS.
+           05  WS-BRACKET-1-LIMIT PIC 9(5)V99 VALUE 500.00.
+           05  WS-BRACKET-2-LIMIT PIC 9(5)V99 VALUE 1000.00.
+           05  WS-BRACKET-3-LIMIT PIC 9(5)V99 VALUE 2000.00.
+           05  WS-TAX-RATE-1      PIC V99     VALUE .10.
+           05  WS-TAX-RATE-2      PIC V99     VALUE .20.
+           05  WS-TAX-RATE-3      PIC V99     VALUE .28.
+           05  WS-TAX-RATE-4      PIC V99     VALUE .35.
+
+       01  WS-DEDUCTION-CONSTANTS.
+           05  WS-HEALTH-AMOUNT   PIC 9(4)V99 VALUE 85.00.
+           05  WS-PENSION-RATE    PIC V99     VALUE .05.
+           05  WS-OT-MULTIPLIER   PIC 9(1)V9  VALUE 1.5.
+           05  WS-OT-THRESHOLD    PIC 9(2)    VALUE 40.
+
+       01  WS-ACCUMULATORS.
+           05  WS-TOTAL-GROSS     PIC 9(9)V99 VALUE ZEROS.
+           05  WS-TOTAL-TAX       PIC 9(9)V99 VALUE ZEROS.
+           05  WS-TOTAL-NET       PIC 9(9)V99 VALUE ZEROS.
+           05  WS-EMP-COUNT       PIC 9(5)    VALUE ZEROS.
+
+       01  WS-REPORT-LINE.
+           05  WS-RPT-EMP-ID      PIC Z(6).
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-RPT-NAME        PIC X(30).
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-RPT-GROSS       PIC $$$,$$$,ZZ9.99.
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-RPT-TAX         PIC $$$,$$$,ZZ9.99.
+           05  FILLER             PIC X(2)    VALUE SPACES.
+           05  WS-RPT-NET         PIC $$$,$$$,ZZ9.99.
+
+       PROCEDURE DIVISION.
+       0000-MAIN-CONTROL.
+           PERFORM 1000-INITIALIZE
+           PERFORM 2000-READ-EMPLOYEE
+           PERFORM 3000-PROCESS-PAYROLL
+               UNTIL WS-EOF-FLAG = 'Y'
+           PERFORM 4000-PRINT-TOTALS
+           PERFORM 9000-TERMINATE
+           STOP RUN.
+
+       1000-INITIALIZE.
+           OPEN INPUT  EMPLOYEE-FILE
+           OPEN OUTPUT PAYROLL-REPORT
+           MOVE 'N' TO WS-EOF-FLAG
+           MOVE 'N' TO WS-ERROR-FLAG
+           MOVE ZEROS TO WS-ACCUMULATORS
+           PERFORM 1100-PRINT-HEADER.
+
+       1100-PRINT-HEADER.
+           MOVE SPACES TO REPORT-RECORD
+           MOVE 'WEEKLY PAYROLL REGISTER' TO REPORT-RECORD
+           WRITE REPORT-RECORD
+           MOVE SPACES TO REPORT-RECORD
+           WRITE REPORT-RECORD.
+
+       2000-READ-EMPLOYEE.
+           READ EMPLOYEE-FILE INTO EMPLOYEE-RECORD
+               AT END MOVE 'Y' TO WS-EOF-FLAG
+           END-READ.
+
+       3000-PROCESS-PAYROLL.
+           MOVE ER-EMP-ID       TO WS-EMP-ID
+           MOVE ER-EMP-NAME     TO WS-EMP-NAME
+           MOVE ER-HOURLY-RATE  TO WS-HOURLY-RATE
+           MOVE ER-HOURS-WORKED TO WS-HOURS-WORKED
+           PERFORM 3100-CALCULATE-GROSS
+           PERFORM 3200-CALCULATE-TAX
+           PERFORM 3300-CALCULATE-DEDUCTIONS
+           PERFORM 3400-CALCULATE-NET
+           PERFORM 3500-PRINT-EMPLOYEE-LINE
+           ADD WS-GROSS-PAY TO WS-TOTAL-GROSS
+           ADD WS-TAX-AMOUNT TO WS-TOTAL-TAX
+           ADD WS-NET-PAY TO WS-TOTAL-NET
+           ADD 1 TO WS-EMP-COUNT
+           PERFORM 2000-READ-EMPLOYEE.
+
+       3100-CALCULATE-GROSS.
+           IF WS-HOURS-WORKED > WS-OT-THRESHOLD
+               MOVE WS-OT-THRESHOLD TO WS-REGULAR-HOURS
+               SUBTRACT WS-OT-THRESHOLD FROM WS-HOURS-WORKED
+                   GIVING WS-OVERTIME-HOURS
+               MULTIPLY WS-HOURLY-RATE BY WS-REGULAR-HOURS
+                   GIVING WS-REGULAR-PAY
+               MULTIPLY WS-HOURLY-RATE BY WS-OT-MULTIPLIER
+                   GIVING WS-OVERTIME-PAY
+               MULTIPLY WS-OVERTIME-HOURS BY WS-OVERTIME-PAY
+                   GIVING WS-OVERTIME-PAY
+           ELSE
+               MOVE WS-HOURS-WORKED TO WS-REGULAR-HOURS
+               MOVE ZEROS TO WS-OVERTIME-HOURS
+               MULTIPLY WS-HOURLY-RATE BY WS-REGULAR-HOURS
+                   GIVING WS-REGULAR-PAY
+               MOVE ZEROS TO WS-OVERTIME-PAY
+           END-IF
+           ADD WS-REGULAR-PAY WS-OVERTIME-PAY
+               GIVING WS-GROSS-PAY.
+
+       3200-CALCULATE-TAX.
+           MOVE WS-GROSS-PAY TO WS-TAXABLE-INCOME
+           EVALUATE TRUE
+               WHEN WS-TAXABLE-INCOME <= WS-BRACKET-1-LIMIT
+                   MULTIPLY WS-TAXABLE-INCOME BY WS-TAX-RATE-1
+                       GIVING WS-TAX-AMOUNT
+               WHEN WS-TAXABLE-INCOME <= WS-BRACKET-2-LIMIT
+                   MULTIPLY WS-TAXABLE-INCOME BY WS-TAX-RATE-2
+                       GIVING WS-TAX-AMOUNT
+               WHEN WS-TAXABLE-INCOME <= WS-BRACKET-3-LIMIT
+                   MULTIPLY WS-TAXABLE-INCOME BY WS-TAX-RATE-3
+                       GIVING WS-TAX-AMOUNT
+               WHEN OTHER
+                   MULTIPLY WS-TAXABLE-INCOME BY WS-TAX-RATE-4
+                       GIVING WS-TAX-AMOUNT
+           END-EVALUATE.
+
+       3300-CALCULATE-DEDUCTIONS.
+           MOVE ZEROS TO WS-HEALTH-DED
+           MOVE ZEROS TO WS-PENSION-DED
+           IF ER-HEALTH-FLAG = 'Y'
+               MOVE WS-HEALTH-AMOUNT TO WS-HEALTH-DED
+           END-IF
+           IF ER-PENSION-FLAG = 'Y'
+               MULTIPLY WS-GROSS-PAY BY WS-PENSION-RATE
+                   GIVING WS-PENSION-DED
+           END-IF
+           ADD WS-HEALTH-DED WS-PENSION-DED WS-TAX-AMOUNT
+               GIVING WS-TOTAL-DEDUCT.
+
+       3400-CALCULATE-NET.
+           SUBTRACT WS-TOTAL-DEDUCT FROM WS-GROSS-PAY
+               GIVING WS-NET-PAY
+           IF WS-NET-PAY < ZEROS
+               MOVE ZEROS TO WS-NET-PAY
+           END-IF.
+
+       3500-PRINT-EMPLOYEE-LINE.
+           MOVE WS-EMP-ID    TO WS-RPT-EMP-ID
+           MOVE WS-EMP-NAME  TO WS-RPT-NAME
+           MOVE WS-GROSS-PAY TO WS-RPT-GROSS
+           MOVE WS-TAX-AMOUNT TO WS-RPT-TAX
+           MOVE WS-NET-PAY   TO WS-RPT-NET
+           MOVE WS-REPORT-LINE TO REPORT-RECORD
+           WRITE REPORT-RECORD.
+
+       4000-PRINT-TOTALS.
+           MOVE SPACES TO REPORT-RECORD
+           WRITE REPORT-RECORD
+           STRING 'TOTAL EMPLOYEES: ' WS-EMP-COUNT
+               DELIMITED BY SIZE
+               INTO REPORT-RECORD
+           WRITE REPORT-RECORD.
+
+       9000-TERMINATE.
+           CLOSE EMPLOYEE-FILE
+           CLOSE PAYROLL-REPORT.

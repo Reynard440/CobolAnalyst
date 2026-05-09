@@ -1,0 +1,285 @@
+@page "/workshop"
+@rendermode InteractiveServer
+@using CobolAnalyst.Web.Core.Prompts
+@using CobolAnalyst.Web.Models
+
+@inject PromptTemplateStore TemplateStore
+
+<PageTitle>CobolAnalyst — Workshop</PageTitle>
+
+<div class="analyst-layout">
+
+    <!-- ── Left panel: template list ── -->
+    <aside class="sidebar">
+        <div class="sidebar-section">
+            <span class="sidebar-label">Prompt Templates</span>
+            <button class="btn btn-primary btn-sm" @onclick="OpenCreateModal" style="margin-bottom:10px;">
+                + New Template
+            </button>
+
+            @foreach (var t in _templates)
+            {
+                <div class="template-list-item @(t.Id == _selected?.Id ? "selected" : "")"
+                     @onclick="() => Select(t)">
+                    <div class="tli-header">
+                        @if (t.IsActive)
+                        {
+                            <span class="active-dot" title="Active"></span>
+                        }
+                        <span class="tli-name">@t.Name</span>
+                    </div>
+                    @if (t.LatestF1.HasValue)
+                    {
+                        <span class="f1-chip @F1Class(t.LatestF1.Value)">F1 @t.LatestF1.Value.ToString("P0")</span>
+                    }
+                    @if (t.ParentName is not null)
+                    {
+                        <div class="tli-parent">from @t.ParentName</div>
+                    }
+                </div>
+            }
+
+            @if (_templates.Count == 0)
+            {
+                <span class="kb-stats">No templates yet.</span>
+            }
+        </div>
+    </aside>
+
+    <!-- ── Right panel: template detail ── -->
+    <section class="panel">
+        @if (_selected is null)
+        {
+            <div class="empty-state">
+                <h3>Prompt Workshop</h3>
+                <p>Select a template from the left to view or edit it, or create a new one.</p>
+            </div>
+        }
+        else
+        {
+            <div class="page-header" style="display:flex;align-items:center;gap:12px;">
+                @_selected.Name
+                @if (_selected.IsActive)
+                {
+                    <span class="badge badge-active">Active</span>
+                }
+                @if (_selected.BestF1.HasValue)
+                {
+                    <span class="f1-chip @F1Class(_selected.BestF1.Value)">Best F1 @_selected.BestF1.Value.ToString("P0")</span>
+                }
+            </div>
+
+            @if (_selected.ParentName is not null)
+            {
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
+                    Derived from <strong>@_selected.ParentName</strong>
+                </div>
+            }
+
+            <div class="workshop-form">
+
+                <label class="wf-label">Description</label>
+                <input class="wf-input" @bind="_editDesc" placeholder="Short description of this template's intent" />
+
+                <label class="wf-label">
+                    Persona Override
+                    <small class="wf-hint">Replaces the opening "You are a …" sentence. Leave blank to use the default.</small>
+                </label>
+                <textarea class="wf-textarea" @bind="_editPersona" rows="3"
+                          placeholder="e.g. You are a strict COBOL modernisation analyst focused on financial rules only."></textarea>
+
+                <label class="wf-label">
+                    Suppression Override
+                    <small class="wf-hint">Replaces the full suppression list. Leave blank to use the language-aware default.</small>
+                </label>
+                <textarea class="wf-textarea" @bind="_editSuppress" rows="4"
+                          placeholder="e.g. Do NOT extract: FILLER fields, debug DISPLAY statements, comments, or any rule with Low confidence."></textarea>
+
+                <label class="wf-label">
+                    Additional Instructions
+                    <small class="wf-hint">Appended before the Output Instructions section. Use to add extra constraints or examples.</small>
+                </label>
+                <textarea class="wf-textarea" @bind="_editAdditional" rows="5"
+                          placeholder="e.g. Always extract rules for COMPUTE statements even when they appear trivial."></textarea>
+
+                <div class="wf-actions">
+                    <button class="btn btn-primary" @onclick="SaveEdits">Save Changes</button>
+                    @if (!_selected.IsActive)
+                    {
+                        <button class="btn" @onclick="ActivateSelected">Set as Active</button>
+                    }
+                    <button class="btn" @onclick="OpenDeriveModal">Derive New Template</button>
+                </div>
+
+                @if (_saveMessage is not null)
+                {
+                    <div class="save-confirm">@_saveMessage</div>
+                }
+            </div>
+
+            <!-- Validation history -->
+            @if (_selected.ValidationHistory.Count > 0)
+            {
+                <div class="section-header" style="margin-top:28px;">Validation History</div>
+                <table class="data-table" style="margin-top:10px;">
+                    <thead>
+                        <tr><th>Date (UTC)</th><th>Session</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var rec in _selected.ValidationHistory.OrderByDescending(r => r.RunAt))
+                        {
+                            <tr>
+                                <td>@rec.RunAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                <td>@rec.SessionName</td>
+                                <td class="num">@rec.TruePositives</td>
+                                <td class="num">@rec.FalsePositives</td>
+                                <td class="num">@rec.FalseNegatives</td>
+                                <td class="num">@rec.Precision.ToString("P0")</td>
+                                <td class="num">@rec.Recall.ToString("P0")</td>
+                                <td class="num f1-cell @F1Class(rec.F1)">@rec.F1.ToString("P0")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        }
+    </section>
+</div>
+
+<!-- ── Create modal ── -->
+@if (_showCreateModal)
+{
+    <div class="modal-backdrop" @onclick="CloseModals">
+        <div class="modal-box" @onclick:stopPropagation="true">
+            <div class="modal-title">New Template</div>
+            <label class="wf-label">Name</label>
+            <input class="wf-input" @bind="_modalName" placeholder="e.g. Strict Financial Rules" />
+            <div class="modal-actions">
+                <button class="btn btn-primary" @onclick="CreateTemplate"
+                        disabled="@string.IsNullOrWhiteSpace(_modalName)">Create</button>
+                <button class="btn" @onclick="CloseModals">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+<!-- ── Derive modal ── -->
+@if (_showDeriveModal)
+{
+    <div class="modal-backdrop" @onclick="CloseModals">
+        <div class="modal-box" @onclick:stopPropagation="true">
+            <div class="modal-title">Derive from "@(_selected?.Name)"</div>
+            <label class="wf-label">New Template Name</label>
+            <input class="wf-input" @bind="_modalName" placeholder="e.g. Strict Rules v2" />
+            <div class="modal-actions">
+                <button class="btn btn-primary" @onclick="DeriveTemplate"
+                        disabled="@string.IsNullOrWhiteSpace(_modalName)">Derive</button>
+                <button class="btn" @onclick="CloseModals">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<PromptTemplate> _templates = [];
+    private PromptTemplate? _selected;
+
+    // Edit fields (bound to form, applied on Save)
+    private string _editDesc = "";
+    private string _editPersona = "";
+    private string _editSuppress = "";
+    private string _editAdditional = "";
+    private string? _saveMessage;
+
+    // Modal state
+    private bool _showCreateModal;
+    private bool _showDeriveModal;
+    private string _modalName = "";
+
+    protected override void OnInitialized()
+    {
+        Reload();
+    }
+
+    private void Reload()
+    {
+        _templates = TemplateStore.GetAll();
+        if (_selected is not null)
+            _selected = _templates.FirstOrDefault(t => t.Id == _selected.Id);
+        if (_selected is not null) PopulateEdits();
+    }
+
+    private void Select(PromptTemplate t)
+    {
+        _selected = t;
+        _saveMessage = null;
+        PopulateEdits();
+    }
+
+    private void PopulateEdits()
+    {
+        _editDesc       = _selected?.Description ?? "";
+        _editPersona    = _selected?.PersonaOverride ?? "";
+        _editSuppress   = _selected?.SuppressionOverride ?? "";
+        _editAdditional = _selected?.AdditionalInstructions ?? "";
+    }
+
+    private void SaveEdits()
+    {
+        if (_selected is null) return;
+        _selected.Description            = _editDesc;
+        _selected.PersonaOverride        = string.IsNullOrWhiteSpace(_editPersona)    ? null : _editPersona.Trim();
+        _selected.SuppressionOverride    = string.IsNullOrWhiteSpace(_editSuppress)   ? null : _editSuppress.Trim();
+        _selected.AdditionalInstructions = string.IsNullOrWhiteSpace(_editAdditional) ? null : _editAdditional.Trim();
+        TemplateStore.Save(_selected);
+        _saveMessage = "Saved.";
+        Reload();
+    }
+
+    private void ActivateSelected()
+    {
+        if (_selected is null) return;
+        TemplateStore.Activate(_selected.Id);
+        _saveMessage = $"'{_selected.Name}' is now the active template.";
+        Reload();
+    }
+
+    private void OpenCreateModal()
+    {
+        _modalName = "";
+        _showCreateModal = true;
+    }
+
+    private void OpenDeriveModal()
+    {
+        _modalName = "";
+        _showDeriveModal = true;
+    }
+
+    private void CloseModals()
+    {
+        _showCreateModal = false;
+        _showDeriveModal = false;
+    }
+
+    private void CreateTemplate()
+    {
+        var t = new PromptTemplate { Name = _modalName.Trim(), IsActive = false };
+        TemplateStore.Save(t);
+        CloseModals();
+        Reload();
+        Select(t);
+    }
+
+    private void DeriveTemplate()
+    {
+        if (_selected is null) return;
+        var child = TemplateStore.Derive(_selected.Id, _modalName.Trim());
+        CloseModals();
+        Reload();
+        Select(child);
+    }
+
+    private static string F1Class(double f1) =>
+        f1 >= 0.75 ? "f1-high" : f1 >= 0.50 ? "f1-mid" : "f1-low";
+}
