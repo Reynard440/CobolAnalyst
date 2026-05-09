@@ -194,19 +194,24 @@
             <!-- Summary bar -->
             <div class="summary-bar">
                 <div class="sb-item sb-accepted">
-                    <span class="sb-count">@_session.AcceptedCount</span> Accepted
+                    <span class="sb-count">@_session.AcceptedCount</span>
+                    Accepted
                 </div>
                 <div class="sb-item sb-rejected">
-                    <span class="sb-count">@_session.RejectedCount</span> Rejected
+                    <span class="sb-count">@_session.RejectedCount</span>
+                    Rejected
                 </div>
                 <div class="sb-item sb-flagged">
-                    <span class="sb-count">@_session.FlaggedCount</span> Flagged
+                    <span class="sb-count">@_session.FlaggedCount</span>
+                    Flagged
                 </div>
                 <div class="sb-item sb-pending">
-                    <span class="sb-count">@_session.PendingCount</span> Pending
+                    <span class="sb-count">@_session.PendingCount</span>
+                    Pending
                 </div>
-                <div style="margin-left:auto;font-size:12px;color:var(--text-secondary);">
-                    @_session.Rules.Count total &bull; @_session.ModelUsed
+                <div class="sb-item sb-meta" style="flex:2;align-items:flex-end;padding-right:16px;font-size:11px;color:var(--text-3);text-align:right;flex-direction:column;justify-content:center;">
+                    <span><strong style="color:var(--text-2);">@_session.Rules.Count</strong> rules total</span>
+                    <span>@_session.ModelUsed</span>
                 </div>
             </div>
 
