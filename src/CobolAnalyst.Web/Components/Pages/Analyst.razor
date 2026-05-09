@@ -3,12 +3,15 @@
 @implements IDisposable
 @using CobolAnalyst.Web.Core.Cache
 @using CobolAnalyst.Web.Core.Prompts
+@using CobolAnalyst.Web.Core.State
+@inject AnalysisStateService State
 @inject ICobolChunker Chunker
 @inject IAnalysisOrchestrator Orchestrator
 @inject ILlmClient LlmClient
 @inject SessionStore Sessions
 @inject KnowledgeBaseService KnowledgeBase
 @inject PromptTemplateStore TemplateStore
+@inject IConfiguration Config
 @inject IJSRuntime JS
 
 <PageTitle>CobolAnalyst — Analyst</PageTitle>
@@ -336,18 +339,19 @@
 
     // Model selection
     private List<string> _availableModels = [];
-    private string _selectedModel = "";
     private bool _loadingModels = true;
 
     // Elapsed timer
     private PeriodicTimer? _ticker;
     private string _elapsedDisplay = "";
 
-    // State
-    private List<(string Path, string? Error)> _stagedPaths = [];
-    private AnalysisSession? _session;
-    private string _sessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
-    private bool _analysing;
+    // State — delegate to circuit-scoped AnalysisStateService so state survives navigation.
+    private AnalysisSession? _session    { get => State.Session;     set => State.Session     = value; }
+    private List<(string Path, string? Error)> _stagedPaths { get => State.StagedPaths; set => State.StagedPaths = value; }
+    private bool _analysing              { get => State.IsAnalysing; set => State.IsAnalysing = value; }
+    private string _sessionName          { get => State.SessionName; set => State.SessionName = value; }
+    private string _selectedModel        { get => State.SelectedModel; set => State.SelectedModel = value; }
+
     private bool _dragging;
     private string? _globalError;
     private string _activeModel = "";
@@ -385,17 +389,27 @@
 
     protected override async Task OnInitializedAsync()
     {
-        _selectedModel = LlmClient.SelectedModel;
+        // Subscribe for reactive updates from other components.
+        State.OnStateChanged += StateChangeHandler;
+
+        // Initialise model — prefer persisted selection from previous navigation.
+        if (string.IsNullOrEmpty(State.SelectedModel))
+            State.SelectedModel = LlmClient.SelectedModel;
+        else
+            LlmClient.SelectedModel = State.SelectedModel;
+
         _availableModels = [.. await LlmClient.GetAvailableModelsAsync()];
         _loadingModels = false;
 
-        // If the configured default isn't in the list, pick the first available
+        // If the stored model isn't available (e.g. user removed it), fall back.
         if (_availableModels.Count > 0 && !_availableModels.Contains(_selectedModel))
         {
             _selectedModel = _availableModels[0];
             LlmClient.SelectedModel = _selectedModel;
         }
     }
+
+    private void StateChangeHandler() => InvokeAsync(StateHasChanged);
 
     private void OnModelChanged(ChangeEventArgs e)
     {
@@ -485,6 +499,7 @@
             _analysing = false;
             // Cancel the CTS to stop the elapsed timer task.
             _cts?.Cancel();
+            State.NotifyChanged();
             StateHasChanged();
         }
     }
@@ -494,13 +509,28 @@
         rule.Decision = decision == rule.Decision ? ReviewDecision.Pending : decision;
         rule.DecidedAt = DateTime.UtcNow;
 
-        if (rule.Decision == ReviewDecision.Accepted && rule.Confidence == ConfidenceLevel.High)
+        // ConfidenceLevel enum: High=0, Medium=1, Low=2.
+        // "(int)rule.Confidence <= (int)minThreshold" means equal or more confident.
+        if (rule.Decision == ReviewDecision.Accepted &&
+            (int)rule.Confidence <= (int)GetMinConfidence())
+        {
             KnowledgeBase.AddRule(rule);
+        }
 
         if (_session is not null)
             await Sessions.SaveAsync(_session);
 
+        State.NotifyChanged();
         StateHasChanged();
+    }
+
+    // ConfidenceLevel: High=0 (best), Medium=1, Low=2 (worst).
+    // Returns the threshold below which rules won't be added to the KB.
+    private ConfidenceLevel GetMinConfidence()
+    {
+        var raw = Config["KnowledgeBase:MinConfidence"] ?? "High";
+        return Enum.TryParse<ConfidenceLevel>(raw, ignoreCase: true, out var level)
+            ? level : ConfidenceLevel.High;
     }
 
     private void ToggleQueryPanel() => _showQuery = !_showQuery;
@@ -555,20 +585,18 @@
     private void NavigateToGenerate()
     {
         if (_session is not null)
-            Nav.NavigateTo($"/generate?session={_session.Id}");
+            Nav.NavigateTo("/generate");
     }
 
     private void ClearSession()
     {
         _cts?.Cancel();
-        _session = null;
-        _stagedPaths = [];
         _progressRows = [];
         _queryText = "";
         _queryResult = "";
         _showQuery = false;
         _globalError = null;
-        _sessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
+        State.Clear(); // clears session, stagedPaths, analysing, sessionName and notifies
         StateHasChanged();
     }
 
@@ -601,6 +629,7 @@
 
     public void Dispose()
     {
+        State.OnStateChanged -= StateChangeHandler;
         _ticker?.Dispose();
         _cts?.Cancel();
         _cts?.Dispose();

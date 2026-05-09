@@ -1,9 +1,11 @@
 @page "/accuracy"
 @rendermode InteractiveServer
 @using System.Text.Json
+@using CobolAnalyst.Web.Core.State
 @using CobolAnalyst.Web.Core.Validation
 @using CobolAnalyst.Web.Models
 
+@inject AnalysisStateService State
 @inject SessionStore Sessions
 @inject ValidationService Validator
 
@@ -270,6 +272,9 @@
     protected override async Task OnInitializedAsync()
     {
         _sessions = await Sessions.ListAsync();
+        // Pre-select the active session if one exists.
+        if (State.Session is not null && _sessions.Any(s => s.Id == State.Session.Id))
+            _selectedSessionId = State.Session.Id;
     }
 
     private async Task RunValidation()

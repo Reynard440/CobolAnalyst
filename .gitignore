@@ -5,6 +5,11 @@ obj/
 ## Data (local-only storage — sessions, cache, generated files)
 **/data/
 
+## App configuration (may contain local paths; use appsettings.example.json as template)
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
 ## Visual Studio
 .vs/
 *.user

@@ -1,5 +1,7 @@
 @page "/generate"
 @rendermode InteractiveServer
+@using CobolAnalyst.Web.Core.State
+@inject AnalysisStateService State
 @inject SessionStore SessionStore
 @inject CSharpScaffoldGenerator Generator
 @inject IJSRuntime JS
@@ -16,8 +18,9 @@
     else if (_session is null)
     {
         <div class="empty-state">
-            <h3>No session loaded</h3>
-            <p>Load a session from the <a href="/sessions">Sessions page</a> or run an analysis first.</p>
+            <h3>No active session</h3>
+            <p>Return to the <a href="/">Analyst</a> tab and complete an analysis first,
+               or load a saved session from the <a href="/sessions">Sessions</a> page.</p>
         </div>
     }
     else
@@ -92,8 +95,14 @@
 
     protected override async Task OnInitializedAsync()
     {
-        if (!string.IsNullOrEmpty(Session))
+        // Prefer the active in-memory session from the state service (survives navigation).
+        if (State.Session is not null)
         {
+            _session = State.Session;
+        }
+        else if (!string.IsNullOrEmpty(Session))
+        {
+            // Fall back to loading by ID from disk (e.g. navigated directly via URL).
             try
             {
                 _session = await SessionStore.LoadAsync(Session);

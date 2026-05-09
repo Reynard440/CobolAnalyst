@@ -7,6 +7,7 @@ using CobolAnalyst.Web.Core.KnowledgeBase;
 using CobolAnalyst.Web.Core.Llm;
 using CobolAnalyst.Web.Core.Prompts;
 using CobolAnalyst.Web.Core.Sessions;
+using CobolAnalyst.Web.Core.State;
 using CobolAnalyst.Web.Core.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,6 +30,7 @@ builder.Services.AddSingleton<ComplexityScorer>();
 builder.Services.AddSingleton<PromptTemplateStore>();
 builder.Services.AddSingleton<ValidationService>();
 
+builder.Services.AddScoped<AnalysisStateService>();
 builder.Services.AddScoped<ICobolChunker, CobolChunker>();
 builder.Services.AddScoped<IAnalysisOrchestrator, AnalysisOrchestrator>();
 

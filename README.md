@@ -1,6 +1,6 @@
 # CobolAnalyst
 
-CobolAnalyst is a local-first static analysis tool that uses the Anthropic Claude API to extract business rules, data definitions, and control flow from legacy COBOL source files. It supports natural-language querying of analysis results and generates C# migration scaffolds — bridging the gap between ageing mainframe code and modern software delivery. The tool was independently designed as a demonstration of LLM-augmented static analysis techniques applied to one of the most persistent problems in enterprise computing: COBOL modernisation.
+CobolAnalyst is a local-first static analysis tool that uses a locally-hosted LLM via Ollama for fully offline, private analysis — no data leaves the machine. It extracts business rules, data definitions, and control flow from legacy COBOL source files, supports natural-language querying of analysis results, and generates C# migration scaffolds — bridging the gap between ageing mainframe code and modern software delivery. The tool was independently designed as a demonstration of LLM-augmented static analysis techniques applied to one of the most persistent problems in enterprise computing: COBOL modernisation.
 
 An estimated 800 billion lines of COBOL remain in active production globally, underpinning major banks, government agencies, and insurance carriers. Despite its age, COBOL processes roughly 95% of ATM transactions and 80% of in-person transactions worldwide. Organisations that want to modernise face a fundamental challenge: the business rules embedded in COBOL programs were often never written down anywhere else, and the original authors are long gone. CobolAnalyst treats that knowledge extraction problem as an LLM task.
 
@@ -14,7 +14,7 @@ COBOL Files
     ▼
 ┌─────────────┐
 │   Chunker   │  Splits at paragraph / division boundaries (regex)
-│             │  Merges small chunks (< 300 estimated tokens) to reduce API calls
+│             │  Merges small chunks (< 300 estimated tokens) to reduce LLM calls
 └──────┬──────┘
        │  List<CobolChunk>
        ▼
@@ -31,12 +31,12 @@ COBOL Files
        │  Prompt strings
        ▼
 ┌──────────────────────┐
-│  Anthropic API       │  POST /v1/messages  stream:true
-│  (raw HttpClient)    │  SSE → IAsyncEnumerable<string>
-│  claude-sonnet-4-... │  Up to 4 concurrent chunks (SemaphoreSlim)
-│  Exponential backoff │  3 retries on 529 / 503 / 429
+│  Ollama API          │  POST /api/chat  stream:true (NDJSON)
+│  (raw HttpClient)    │  IAsyncEnumerable<string> token stream
+│  Model selector UI   │  Up to 4 concurrent chunks (SemaphoreSlim)
+│  Exponential backoff │  3 retries on timeout
 └──────┬───────────────┘
-       │  Raw SSE token stream
+       │  Raw NDJSON token stream
        ▼
 ┌──────────────┐
 │  JSON Repair │  Bracket-stack closer for truncated responses
@@ -59,11 +59,10 @@ COBOL Files
        ▼
 ┌─────────────────────────┐     ┌────────────────────┐
 │  Session Store          │     │  Knowledge Base     │
-│  /data/sessions/{id}    │     │  High-confidence    │
-│  .json  (full session   │     │  accepted rules →   │
-│  + all decisions)       │     │  prompt hints for   │
-└─────────────────────────┘     │  future analyses    │
-                                └────────────────────┘
+│  /data/sessions/{id}    │     │  Accepted rules →   │
+│  .json  (full session   │     │  prompt hints for   │
+│  + all decisions)       │     │  future analyses    │
+└─────────────────────────┘     └────────────────────┘
        │  Accepted rules
        ▼
 ┌─────────────────────────────┐
@@ -77,8 +76,11 @@ COBOL Files
 
 ## Key Technical Decisions
 
-**Raw `HttpClient` instead of an Anthropic SDK**
-The Anthropic .NET ecosystem has no official SDK. Using `HttpClient` directly forces the implementation to handle the actual API contract — SSE framing, `data:` line parsing, `content_block_delta` event types, and exponential back-off — rather than hiding it behind an abstraction. For a portfolio piece, this makes the API-level understanding explicit and auditable.
+**Local LLM via Ollama instead of a cloud API**
+All inference runs locally. No source code, extracted rules, or prompt text is transmitted to an external service. This makes the tool suitable for analysing code that cannot leave a corporate network. The Ollama HTTP API (`POST /api/chat`, NDJSON streaming) is structurally similar to major cloud LLM APIs — replacing it with a cloud provider is a one-class change.
+
+**Raw `HttpClient` instead of an SDK**
+Using `HttpClient` directly forces the implementation to handle the actual API contract — NDJSON framing, streaming token accumulation, and exponential back-off — rather than hiding it behind an abstraction. For a portfolio piece, this makes the integration-level understanding explicit and auditable.
 
 **Filesystem JSON instead of a database**
 The tool is meant to run locally on a developer's machine with zero infrastructure. SQLite or any ORM adds a dependency and a migration story; a directory of JSON files is trivially inspectable, diffable with `git diff`, and portable across machines with a simple `xcopy`. The trade-off is that there is no indexing, so session listing does a linear file scan — acceptable at the scale of dozens of sessions.
@@ -87,35 +89,41 @@ The tool is meant to run locally on a developer's machine with zero infrastructu
 COBOL business logic is organised into named paragraphs (`COMPUTE-OVERTIME.`, `VALIDATE-ACCOUNT.`). A chunk that perfectly contains one paragraph gives the LLM a semantically coherent unit: one verb phrase, one set of local variables, one set of PERFORM calls. Line-based splitting would routinely cut through an `IF ... END-IF` block, producing malformed context; token-based splitting has the same problem. Paragraph splitting preserves the logical unit that the original developer chose.
 
 **Complexity-adaptive prompting**
-Early prototyping showed that a uniform "describe this COBOL" prompt hallucinated on deeply nested `EVALUATE` blocks while being verbose on trivial `MOVE` statements. Scoring each chunk first and injecting a tier-appropriate instruction ("trace every execution path" vs "be concise") reduces both over-generation and under-generation. The score runs locally in milliseconds with zero API calls.
+Early prototyping showed that a uniform "describe this COBOL" prompt hallucinated on deeply nested `EVALUATE` blocks while being verbose on trivial `MOVE` statements. Scoring each chunk first and injecting a tier-appropriate instruction ("trace every execution path" vs "be concise") reduces both over-generation and under-generation. The score runs locally in milliseconds with zero LLM calls.
+
+**Circuit-scoped session state**
+Analysis state (uploaded files, extracted rules, user decisions) is held in a Scoped DI service (`AnalysisStateService`) tied to the SignalR circuit lifetime. Navigating between the Analyst, Generate, and Accuracy pages preserves in-progress work without requiring a database or explicit save action.
 
 **Streaming LLM output**
-Analysing a realistic 150-line COBOL file with six paragraphs can take 20–30 seconds of LLM wall-clock time if collected synchronously. Streaming lets the progress list update token-by-token, giving the analyst immediate visual feedback that the system is working. The Blazor Server `InvokeAsync(StateHasChanged)` pattern propagates each token to the browser over the existing SignalR connection.
+Analysing a realistic 150-line COBOL file with six paragraphs can take 20–60 seconds of LLM wall-clock time if collected synchronously. Streaming lets the progress list update token-by-token, giving the analyst immediate visual feedback that the system is working. The Blazor Server `InvokeAsync(StateHasChanged)` pattern propagates each token to the browser over the existing SignalR connection.
 
 ---
 
 ## Setup
 
 ### Prerequisites
+
 - .NET 8 SDK
-- An Anthropic API key (get one at console.anthropic.com)
+- [Ollama](https://ollama.com) installed and running. Pull at least one model before use:
+
+```bash
+ollama pull qwen2.5-coder:14b   # recommended starting point (~9 GB)
+# or
+ollama pull llama3.1:8b          # lighter option (~5 GB)
+```
 
 ### Steps
 
 ```bash
 git clone <repo-url>
 cd CobolAnalyst
-
-# Copy the example config and add your API key
-cp appsettings.example.json src/CobolAnalyst.Web/appsettings.json
-# Edit src/CobolAnalyst.Web/appsettings.json and set Anthropic:ApiKey
-
+ollama pull qwen2.5-coder:14b        # or any model you prefer
 dotnet run --project src/CobolAnalyst.Web
 ```
 
 Open your browser at `https://localhost:5001` (or the URL shown in the terminal).
 
-On the **Analyst** page, click the upload zone and select one or more files from the `sample-data/` directory, then click **Analyse**.
+On the **Analyst** page, select your model from the dropdown, click the upload zone and select one or more files from the `sample-data/` directory, then click **Analyse**.
 
 ---
 
@@ -181,24 +189,27 @@ CobolAnalyst/
         │   ├── Chunking/          ICobolChunker, CobolChunker
         │   ├── Analysis/          IAnalysisOrchestrator, AnalysisOrchestrator,
         │   │                      ComplexityScorer
-        │   ├── Llm/               IAnthropicClient, AnthropicClient (raw SSE),
+        │   ├── Llm/               ILlmClient, OllamaClient (raw HttpClient, NDJSON),
         │   │                      PromptBuilder
         │   ├── Cache/             AnalysisCache (memory + filesystem)
         │   ├── KnowledgeBase/     KnowledgeBaseService
         │   ├── Sessions/          SessionStore, SessionSummary
+        │   ├── State/             AnalysisStateService (circuit-scoped)
         │   └── Generation/        CSharpScaffoldGenerator (Roslyn-validated)
         ├── Models/
         │   ├── CobolFile.cs       Source file metadata
         │   ├── CobolChunk.cs      Paragraph-boundary slice
         │   ├── ExtractedRule.cs   Rule with type, confidence, decision
         │   ├── AnalysisSession.cs Full session: files, chunks, rules, decisions
-        │   ├── KnowledgeEntry.cs  Persisted high-confidence rule
+        │   ├── KnowledgeEntry.cs  Persisted accepted rule
         │   └── GenerationResult.cs Output of scaffold generation
         └── Components/
             ├── Pages/
             │   ├── Analyst.razor  Main workflow: upload → analyse → review → query
             │   ├── Sessions.razor Saved session browser
-            │   └── Generate.razor C# scaffold viewer with copy-to-clipboard
+            │   ├── Generate.razor C# scaffold viewer with copy-to-clipboard
+            │   ├── Accuracy.razor Precision/recall/F1 validation dashboard
+            │   └── Workshop.razor Prompt template management
             └── Layout/
                 └── MainLayout.razor  Top nav, dark theme layout
 ```
