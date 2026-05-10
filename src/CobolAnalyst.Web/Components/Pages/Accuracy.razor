@@ -1,11 +1,14 @@
 @page "/accuracy"
 @rendermode InteractiveServer
+@implements IDisposable
 @using CobolAnalyst.Web.Core.State
 @using CobolAnalyst.Web.Core.Validation
 @using CobolAnalyst.Web.Core.Sessions
 @using CobolAnalyst.Web.Core.Prompts
+@using CobolAnalyst.Web.Core.Llm
 @using CobolAnalyst.Web.Models
 @using Microsoft.AspNetCore.Components.Forms
+@using System.Text
 
 @inject AnalysisStateService  State
 @inject SessionStore          SessionStore
@@ -13,6 +16,8 @@
 @inject ValidationStore       ValStore
 @inject GroundTruthParser     Parser
 @inject PromptTemplateStore   Templates
+@inject ILlmClient            LlmClient
+@inject IJSRuntime            JS
 
 <PageTitle>CobolAnalyst — Accuracy</PageTitle>
 
@@ -24,7 +29,7 @@
         <!-- Session selector -->
         <div class="sidebar-section">
             <span class="sidebar-label">Session</span>
-            <select class="model-select" @bind="_selectedSessionId" disabled="@_running">
+            <select class="model-select" value="@_selectedSessionId" @onchange="OnPrimarySessionChanged" disabled="@_running">
                 <option value="">— pick a session —</option>
                 @foreach (var s in _sessions)
                 {
@@ -33,34 +38,142 @@
             </select>
         </div>
 
-        <!-- Ground truth file upload -->
+        <!-- Ground truth section -->
         <div class="sidebar-section">
-            <span class="sidebar-label">Ground Truth File</span>
-            <label class="gt-upload-zone">
-                <InputFile OnChange="OnFileSelected" accept=".txt,.docx,.doc" disabled="@_running" />
-                @if (_gtRules.Count == 0 && !_parsing)
-                {
-                    <div class="upload-icon">&#x1F4C4;</div>
-                    <p class="upload-hint">Drop or click to upload</p>
-                    <p class="upload-hint-sub">.txt &nbsp;·&nbsp; .docx &nbsp;·&nbsp; .doc</p>
-                    <p class="upload-hint-sub">Format: <code>ID | Category | Rule text</code></p>
-                }
-                else if (_parsing)
-                {
-                    <div class="upload-icon">&#x23F3;</div>
-                    <p class="upload-hint">Parsing file…</p>
-                }
-                else
-                {
-                    <div class="upload-icon">&#x2705;</div>
-                    <p class="upload-success">@_gtRules.Count rule@(_gtRules.Count == 1 ? "" : "s") loaded</p>
-                    <p class="upload-hint-sub">@_gtFileName</p>
-                    <button class="acc-clear-btn" @onclick="ClearGroundTruth" type="button" disabled="@_running">&#x2715; Clear</button>
-                }
-            </label>
-            @if (_parseError is not null)
+            <span class="sidebar-label">Ground Truth</span>
+
+            <!-- Mode pills -->
+            <div class="gt-mode-pills">
+                <button class="gt-mode-pill @(_gtMode == GtMode.Type     ? "active" : "")" @onclick='() => SwitchMode(GtMode.Type)'     disabled="@_running" type="button">Type</button>
+                <button class="gt-mode-pill @(_gtMode == GtMode.Upload   ? "active" : "")" @onclick='() => SwitchMode(GtMode.Upload)'   disabled="@_running" type="button">Upload</button>
+                <button class="gt-mode-pill @(_gtMode == GtMode.Generate ? "active" : "")" @onclick='() => SwitchMode(GtMode.Generate)' disabled="@_running" type="button">Generate</button>
+                <button class="gt-mode-pill @(_gtMode == GtMode.Compare  ? "active" : "")" @onclick='() => SwitchMode(GtMode.Compare)'  disabled="@_running" type="button">Compare</button>
+            </div>
+
+            <!-- ── TYPE mode ── -->
+            @if (_gtMode == GtMode.Type)
             {
-                <div class="error-msg" style="margin-top:6px;">@_parseError</div>
+                <div class="gt-inline-header">
+                    <span style="font-size:11px;color:var(--text-3);">One rule per line</span>
+                    @if (!string.IsNullOrEmpty(_typedText))
+                    {
+                        <button class="acc-clear-btn" @onclick="ClearTypedText" type="button">✕ Clear</button>
+                    }
+                </div>
+                <textarea class="gt-textarea"
+                          rows="12"
+                          placeholder="# One rule per line. Format:&#10;# GT-001 | Category | Rule description&#10;#&#10;GT-001 | Calculations | Overtime is paid at 1.5x for hours beyond 40&#10;GT-002 | Validations | Employee ID must be numeric and 6 digits&#10;GT-003 | Constraints | Max order quantity must not exceed MAX-ORDER-QTY"
+                          @bind="_typedText"
+                          @bind:event="oninput"
+                          @bind:after="RefreshTypedRules"
+                          disabled="@_running"
+                          style="min-height:180px;"></textarea>
+                @if (_typedRules.Count > 0)
+                {
+                    <span class="gt-parse-feedback gt-parse-ok">✓ @_typedRules.Count rule@(_typedRules.Count == 1 ? "" : "s") parsed</span>
+                }
+                else if (!string.IsNullOrWhiteSpace(_typedText))
+                {
+                    <span class="gt-parse-feedback gt-parse-warn">⚠ No valid rules found</span>
+                }
+            }
+
+            <!-- ── UPLOAD mode ── -->
+            else if (_gtMode == GtMode.Upload)
+            {
+                <label class="gt-upload-zone">
+                    <InputFile OnChange="OnFileSelected" accept=".txt,.docx,.doc" disabled="@_running" />
+                    @if (_gtRules.Count == 0 && !_parsing)
+                    {
+                        <div class="upload-icon">&#x1F4C4;</div>
+                        <p class="upload-hint">Drop or click to upload</p>
+                        <p class="upload-hint-sub">.txt &nbsp;·&nbsp; .docx &nbsp;·&nbsp; .doc</p>
+                        <p class="upload-hint-sub">Format: <code>ID | Category | Rule text</code></p>
+                    }
+                    else if (_parsing)
+                    {
+                        <div class="upload-icon">&#x23F3;</div>
+                        <p class="upload-hint">Parsing file…</p>
+                    }
+                    else
+                    {
+                        <div class="upload-icon">&#x2705;</div>
+                        <p class="upload-success">@_gtRules.Count rule@(_gtRules.Count == 1 ? "" : "s") extracted from @_gtFileName</p>
+                        <button class="acc-clear-btn" @onclick="ClearGroundTruth" type="button" disabled="@_running">&#x2715; Clear</button>
+                    }
+                </label>
+                @if (_parseError is not null)
+                {
+                    <div class="error-msg" style="margin-top:6px;">@_parseError</div>
+                }
+            }
+
+            <!-- ── GENERATE mode ── -->
+            else if (_gtMode == GtMode.Generate)
+            {
+                <button class="btn btn-primary"
+                        style="width:100%;"
+                        @onclick="GenerateGroundTruth"
+                        disabled="@(!CanGenerate)"
+                        title="@(string.IsNullOrEmpty(_selectedSessionId) ? "Select a session first" : "")"
+                        type="button">
+                    @(_generating ? "⏳ Generating…" : "✨ Generate Ground Truth")
+                </button>
+
+                @if (!string.IsNullOrEmpty(_generateStatus))
+                {
+                    <p class="gt-parse-feedback @(_generateStatus.StartsWith("✓") ? "gt-parse-ok" : "gt-parse-warn")"
+                       style="margin-top:6px;">@_generateStatus</p>
+                }
+
+                @if (!string.IsNullOrEmpty(_generateText) || _generating)
+                {
+                    <div class="gt-inline-header" style="margin-top:8px;">
+                        <span style="font-size:11px;color:var(--text-3);">Review and edit before validating</span>
+                    </div>
+                    <textarea class="gt-textarea"
+                              rows="12"
+                              @bind="_generateText"
+                              @bind:event="oninput"
+                              @bind:after="RefreshGenerateRules"
+                              disabled="@(_running || _generating)"
+                              style="min-height:180px;"></textarea>
+                    @if (_generateRules.Count > 0)
+                    {
+                        <span class="gt-parse-feedback gt-parse-ok">✓ @_generateRules.Count rule@(_generateRules.Count == 1 ? "" : "s") parsed</span>
+                    }
+                }
+            }
+
+            <!-- ── COMPARE mode ── -->
+            else if (_gtMode == GtMode.Compare)
+            {
+                <span style="font-size:10px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:0.8px;">Use as Ground Truth:</span>
+                <select class="model-select" @onchange="OnRefSessionChanged" disabled="@_running">
+                    <option value="">— select reference session —</option>
+                    @foreach (var s in _sessions.Where(s => s.Id != _selectedSessionId))
+                    {
+                        <option value="@s.Id">@s.Name — @s.AcceptedCount accepted · @s.CreatedAt.ToString("MM-dd")</option>
+                    }
+                </select>
+
+                @if (!string.IsNullOrEmpty(_refSessionId))
+                {
+                    @if (_refRuleCount == 0)
+                    {
+                        <div class="error-msg" style="font-size:11.5px;margin-top:4px;">
+                            ⚠ No accepted rules in this session — accept some rules first or choose a different session.
+                        </div>
+                    }
+                    else
+                    {
+                        <span class="gt-parse-feedback gt-parse-ok">✓ @_refRuleCount rule@(_refRuleCount == 1 ? "" : "s") will be used as ground truth</span>
+                    }
+                    <label style="font-size:11.5px;color:var(--text-2);display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+                        <input type="checkbox" @bind="_includeFlagged" @bind:after="RefreshRefRules" style="accent-color:var(--brand);width:14px;height:14px;" />
+                        Include Flagged rules
+                    </label>
+                }
             }
         </div>
 
@@ -76,7 +189,9 @@
 
         <!-- Run button -->
         <div class="sidebar-section">
-            <button class="btn btn-primary" @onclick="RunValidation" disabled="@(!CanRun)">
+            <button class="btn btn-primary" @onclick="RunValidation"
+                    disabled="@(!CanRun)"
+                    title="@RunButtonTooltip">
                 @(_running ? "Running…" : "▶  Run Validation")
             </button>
         </div>
@@ -96,7 +211,7 @@
             <div class="empty-state acc-empty">
                 <div class="acc-empty-icon">&#x1F4CA;</div>
                 <h3>Accuracy Dashboard</h3>
-                <p>Select a session, upload a ground truth file, then click <strong>Run Validation</strong>.</p>
+                <p>Select a session, provide ground truth rules, then click <strong>Run Validation</strong>.</p>
                 <div class="acc-format-box">
                     <p class="acc-format-title">Ground truth .txt format</p>
                     <pre class="acc-format-pre"># Comment lines start with #
@@ -112,7 +227,7 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
         }
         else if (_result is not null)
         {
-            <!-- ── Metric chips ── -->
+            <!-- ── Result header ── -->
             <div class="page-header">
                 Accuracy Report
                 <span class="acc-run-meta">
@@ -122,6 +237,18 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
                 </span>
             </div>
 
+            @if (!string.IsNullOrEmpty(_gtSourceDescriptor))
+            {
+                <div class="acc-gt-source">
+                    Ground truth source: <strong>@_gtSourceDescriptor</strong>
+                    @if (_showSave)
+                    {
+                        <button class="acc-clear-btn" style="margin-left:10px;" @onclick="SaveGroundTruthAsFile" type="button">⬇ Save as .txt</button>
+                    }
+                </div>
+            }
+
+            <!-- ── Metric chips ── -->
             <div class="metrics-header">
                 <div class="metric-chip metric-precision">
                     <span class="metric-value">@_result.Precision.ToString("P0")</span>
@@ -358,28 +485,101 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
 
 @code {
 
+    // ── Mode enum ─────────────────────────────────────────────────────────────
+    private enum GtMode { Type, Upload, Generate, Compare }
+
     // ── Tab list ──────────────────────────────────────────────────────────────
     private static readonly string[] Tabs =
         ["Overview", "Matched", "False Positives", "False Negatives", "History", "Guidance"];
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // ── RuleType → GT category map (for Compare mode) ─────────────────────────
+    private static readonly Dictionary<RuleType, string> TypeToCategory = new()
+    {
+        [RuleType.BusinessRule]       = "BusinessRule",
+        [RuleType.Validation]         = "Validation",
+        [RuleType.Calculation]        = "Calculation",
+        [RuleType.DataTransformation] = "DataMapping",
+        [RuleType.ControlFlow]        = "WorkflowControl",
+    };
+
+    // ── Core state ────────────────────────────────────────────────────────────
     private List<SessionSummary>    _sessions          = [];
     private string                  _selectedSessionId = "";
-    private List<GroundTruthRule>   _gtRules           = [];
-    private string                  _gtFileName        = "";
-    private bool                    _parsing;
     private float                   _threshold         = 0.40f;
     private bool                    _running;
     private string?                 _globalError;
-    private string?                 _parseError;
     private ValidationResult?       _result;
     private List<CobolAnalyst.Web.Models.ValidationSummary> _history = [];
     private string                  _activeTab         = "Overview";
 
+    // ── Mode state ────────────────────────────────────────────────────────────
+    private GtMode _gtMode = GtMode.Type;
+
+    // Type mode
+    private string                _typedText  = "";
+    private List<GroundTruthRule> _typedRules = [];
+
+    // Upload mode
+    private List<GroundTruthRule> _gtRules    = [];
+    private string                _gtFileName = "";
+    private bool                  _parsing;
+    private string?               _parseError;
+
+    // Generate mode
+    private string                _generateText   = "";
+    private List<GroundTruthRule> _generateRules  = [];
+    private bool                  _generating;
+    private string?               _generateStatus;
+    private bool                  _generateEdited;
+    private CancellationTokenSource? _generateCts;
+
+    // Compare mode
+    private string                _refSessionId  = "";
+    private bool                  _includeFlagged;
+    private List<GroundTruthRule> _refRules      = [];
+    private int                   _refRuleCount;
+    private string                _refModelUsed  = "";
+
+    // Result metadata
+    private string  _gtSourceDescriptor  = "";
+    private GtMode  _gtModeAtLastRun     = GtMode.Type;
+    private bool    _showSave            => _result is not null &&
+                                           (_gtModeAtLastRun == GtMode.Type || _gtModeAtLastRun == GtMode.Generate);
+
+    // ── Computed CanRun ───────────────────────────────────────────────────────
     private bool CanRun =>
         !_running &&
         !string.IsNullOrEmpty(_selectedSessionId) &&
-        _gtRules.Count > 0;
+        ActiveModeHasRules;
+
+    private bool ActiveModeHasRules => _gtMode switch
+    {
+        GtMode.Type     => _typedRules.Count > 0,
+        GtMode.Upload   => _gtRules.Count > 0,
+        GtMode.Generate => _generateRules.Count > 0,
+        GtMode.Compare  => _refRuleCount > 0,
+        _               => false
+    };
+
+    private bool CanGenerate => !_generating && !string.IsNullOrEmpty(_selectedSessionId);
+
+    private string RunButtonTooltip
+    {
+        get
+        {
+            if (_running) return "";
+            if (string.IsNullOrEmpty(_selectedSessionId)) return "Select a session";
+            if (!ActiveModeHasRules) return _gtMode switch
+            {
+                GtMode.Type     => "Enter at least one rule",
+                GtMode.Upload   => "Upload a ground truth file",
+                GtMode.Generate => "Generate ground truth first",
+                GtMode.Compare  => "Reference session has no accepted rules",
+                _               => ""
+            };
+            return "";
+        }
+    }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -392,7 +592,45 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
             _selectedSessionId = State.Session.Id;
     }
 
-    // ── File upload ───────────────────────────────────────────────────────────
+    public void Dispose()
+    {
+        _generateCts?.Cancel();
+        _generateCts?.Dispose();
+    }
+
+    // ── Mode switching ────────────────────────────────────────────────────────
+
+    private void SwitchMode(GtMode mode)
+    {
+        if (_gtMode == mode) return;
+        if (_generating) { _generateCts?.Cancel(); }
+        _gtMode = mode;
+    }
+
+    private void OnPrimarySessionChanged(ChangeEventArgs e)
+    {
+        var newId = e.Value?.ToString() ?? "";
+        if (_refSessionId == newId)
+        {
+            _refSessionId = "";
+            _refRules     = [];
+            _refRuleCount = 0;
+            _refModelUsed = "";
+        }
+        _selectedSessionId = newId;
+    }
+
+    // ── TYPE mode ─────────────────────────────────────────────────────────────
+
+    private void RefreshTypedRules() => _typedRules = ParseInlineText(_typedText);
+
+    private void ClearTypedText()
+    {
+        _typedText  = "";
+        _typedRules = [];
+    }
+
+    // ── UPLOAD mode ───────────────────────────────────────────────────────────
 
     private async Task OnFileSelected(InputFileChangeEventArgs e)
     {
@@ -407,7 +645,7 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
             var file    = e.File;
             _gtFileName = file.Name;
 
-            const long MaxBytes = 10 * 1024 * 1024; // 10 MB
+            const long MaxBytes = 10 * 1024 * 1024;
             await using var stream = file.OpenReadStream(MaxBytes);
 
             _gtRules = await Parser.ParseAsync(stream, file.Name);
@@ -434,7 +672,128 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
         _parseError = null;
     }
 
-    // ── Run ───────────────────────────────────────────────────────────────────
+    // ── GENERATE mode ─────────────────────────────────────────────────────────
+
+    private void RefreshGenerateRules()
+    {
+        _generateRules = ParseInlineText(_generateText);
+        if (_generateRules.Count > 0 && _generateStatus?.StartsWith("✓") == true)
+            _generateEdited = true;
+    }
+
+    private async Task GenerateGroundTruth()
+    {
+        if (string.IsNullOrEmpty(_selectedSessionId)) return;
+
+        var session = await SessionStore.LoadAsync(_selectedSessionId);
+        if (session is null) return;
+
+        if (session.SourceFiles.Count == 0 || !File.Exists(session.SourceFiles[0].PermanentPath))
+        {
+            _generateStatus = "Source file not available for this session. Use Type or Upload mode.";
+            StateHasChanged();
+            return;
+        }
+
+        _generating     = true;
+        _generateText   = "";
+        _generateRules  = [];
+        _generateEdited = false;
+        _generateStatus = "Reading source file and generating ground truth…";
+        StateHasChanged();
+
+        try
+        {
+            var sourceCode = await File.ReadAllTextAsync(session.SourceFiles[0].PermanentPath);
+
+            var prompt =
+                "You are a COBOL business analyst creating a ground truth rule list\n" +
+                "for validation testing. Read the source code below and extract\n" +
+                "every business rule, validation, calculation, data mapping,\n" +
+                "workflow, and constraint that a thorough analyst should find.\n\n" +
+                "Return ONLY a plain text list in this exact format, one rule per line:\n" +
+                "GT-001 | Category | Rule description in plain English\n\n" +
+                "Categories must be one of:\n" +
+                "Business Rules, Validations, Calculations, Data Mappings,\n" +
+                "Workflows, Constraints, Error Handling\n\n" +
+                "Rules must describe business INTENT (what the system enforces),\n" +
+                "not implementation details (how the code works).\n" +
+                "Aim for completeness — it is better to include borderline rules\n" +
+                "than to miss critical ones.\n\n" +
+                "Source code:\n" + sourceCode + "\n\n" +
+                "Return ONLY the GT-NNN | Category | Description lines. No preamble.";
+
+            _generateCts = new CancellationTokenSource();
+            var sb = new StringBuilder();
+
+            await foreach (var token in LlmClient.StreamCompletionAsync(prompt, _generateCts.Token))
+            {
+                sb.Append(token);
+                _generateText  = sb.ToString();
+                _generateRules = ParseInlineText(_generateText);
+                StateHasChanged();
+            }
+
+            _generateRules  = ParseInlineText(_generateText);
+            _generateStatus = $"✓ {_generateRules.Count} rule{(_generateRules.Count == 1 ? "" : "s")} generated — review and edit before validating";
+        }
+        catch (OperationCanceledException)
+        {
+            _generateStatus = "Generation cancelled.";
+        }
+        catch (Exception ex)
+        {
+            _generateStatus = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            _generating = false;
+            _generateCts?.Dispose();
+            _generateCts = null;
+            StateHasChanged();
+        }
+    }
+
+    // ── COMPARE mode ──────────────────────────────────────────────────────────
+
+    private async Task OnRefSessionChanged(ChangeEventArgs e)
+    {
+        _refSessionId = e.Value?.ToString() ?? "";
+        _refRules     = [];
+        _refRuleCount = 0;
+        _refModelUsed = "";
+
+        if (!string.IsNullOrEmpty(_refSessionId))
+            await RefreshRefRules();
+    }
+
+    private async Task RefreshRefRules()
+    {
+        if (string.IsNullOrEmpty(_refSessionId)) return;
+
+        var session = await SessionStore.LoadAsync(_refSessionId);
+        if (session is null) return;
+
+        _refModelUsed = session.ModelUsed;
+        _refRules     = MapSessionRulesToGroundTruth(session.Rules, _includeFlagged);
+        _refRuleCount = _refRules.Count;
+    }
+
+    private static List<GroundTruthRule> MapSessionRulesToGroundTruth(
+        List<ExtractedRule> rules, bool includeFlagged) =>
+        rules
+            .Where(r => r.Decision == ReviewDecision.Accepted
+                     || (includeFlagged && r.Decision == ReviewDecision.Flagged))
+            .Select(r => new GroundTruthRule
+            {
+                Id        = r.Id,
+                Category  = TypeToCategory.GetValueOrDefault(r.Type, "BusinessRule"),
+                RuleText  = r.Description,
+                SourceRef = r.CobolReference
+            })
+            .ToList();
+
+    // ── Run Validation ────────────────────────────────────────────────────────
 
     private async Task RunValidation()
     {
@@ -448,13 +807,46 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
             var session = await SessionStore.LoadAsync(_selectedSessionId);
             if (session is null) { _globalError = "Session not found on disk."; return; }
 
+            // Collect ground truth from the active mode
+            List<GroundTruthRule> groundTruth;
+            switch (_gtMode)
+            {
+                case GtMode.Type:
+                    groundTruth         = ParseInlineText(_typedText);
+                    _gtSourceDescriptor = $"Typed inline — {groundTruth.Count} rule{(groundTruth.Count == 1 ? "" : "s")}";
+                    break;
+
+                case GtMode.Upload:
+                    groundTruth         = _gtRules;
+                    _gtSourceDescriptor = $"Uploaded — {_gtFileName} ({groundTruth.Count} rule{(groundTruth.Count == 1 ? "" : "s")})";
+                    break;
+
+                case GtMode.Generate:
+                    groundTruth         = ParseInlineText(_generateText);
+                    var editedTag       = _generateEdited ? " (edited)" : "";
+                    _gtSourceDescriptor = $"Generated by LLM — {groundTruth.Count} rule{(groundTruth.Count == 1 ? "" : "s")}{editedTag}";
+                    break;
+
+                case GtMode.Compare:
+                    groundTruth = _refRules;
+                    var refSummary  = _sessions.FirstOrDefault(s => s.Id == _refSessionId);
+                    var modelSuffix = string.IsNullOrEmpty(_refModelUsed) ? "" : $" / {_refModelUsed}";
+                    _gtSourceDescriptor = $"Session comparison — {refSummary?.Name ?? _refSessionId}{modelSuffix} ({groundTruth.Count} rule{(groundTruth.Count == 1 ? "" : "s")})";
+                    break;
+
+                default:
+                    return;
+            }
+
+            _gtModeAtLastRun = _gtMode;
+
             var template  = Templates.GetActive();
             var modelName = State.SelectedModel;
 
             var result = await Task.Run(() =>
                 Validator.RunValidation(
                     session.Rules,
-                    _gtRules,
+                    groundTruth,
                     _threshold,
                     sessionName: session.Name,
                     modelName:   modelName,
@@ -463,7 +855,6 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
 
             await ValStore.SaveAsync(result);
 
-            // Record F1 against the active prompt template for Workshop history
             if (template is not null)
             {
                 Templates.RecordValidation(template.Id, new TemplateValidationRecord
@@ -494,26 +885,77 @@ GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
         }
     }
 
+    // ── Save ground truth as file ─────────────────────────────────────────────
+
+    private async Task SaveGroundTruthAsFile()
+    {
+        var content  = _gtModeAtLastRun == GtMode.Generate ? _generateText : _typedText;
+        var session  = _sessions.FirstOrDefault(s => s.Id == _selectedSessionId);
+        var rawName  = session?.Name ?? "ground_truth";
+        var safeName = string.Concat(rawName.Select(c =>
+            char.IsLetterOrDigit(c) || c == '-' ? c : '_'));
+        var fileName = $"{safeName}_ground_truth.txt";
+
+        await JS.InvokeVoidAsync("downloadTextFile", fileName, content);
+    }
+
+    // ── Inline text parser (Type & Generate modes) ────────────────────────────
+
+    private static List<GroundTruthRule> ParseInlineText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return [];
+
+        var rules      = new List<GroundTruthRule>();
+        int lineNumber = 0;
+
+        foreach (var rawLine in text.Split('\n'))
+        {
+            lineNumber++;
+            var line = rawLine.Trim();
+            if (string.IsNullOrEmpty(line) || line.StartsWith('#')) continue;
+
+            var parts = line.Split('|');
+            if (parts.Length >= 3)
+            {
+                var id       = parts[0].Trim();
+                var category = parts[1].Trim();
+                var ruleText = string.Join('|', parts[2..]).Trim();
+
+                if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(ruleText))
+                {
+                    rules.Add(new GroundTruthRule { Id = id, Category = category, RuleText = ruleText });
+                    continue;
+                }
+            }
+
+            // Fallback: treat whole line as rule text
+            rules.Add(new GroundTruthRule
+            {
+                Id       = $"GT-{lineNumber:D3}",
+                Category = "Business Rules",
+                RuleText = line
+            });
+        }
+
+        return rules;
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Renders an SVG bar chart for category F1 scores as a MarkupString so the
-    /// Razor engine does not mis-parse SVG &lt;text&gt; elements as Razor pseudo-elements.
-    /// </summary>
     private MarkupString RenderBarChart()
     {
         if (_result is null || _result.ByCategory.Count == 0)
             return (MarkupString)"";
 
-        const int barH   = 26;
-        const int gapY   = 8;
-        const int labelW = 150;
+        const int barH    = 26;
+        const int gapY    = 8;
+        const int labelW  = 150;
         const int maxBarW = 240;
 
         var sorted = _result.ByCategory.OrderByDescending(c => c.F1).ToList();
         int svgH   = sorted.Count * (barH + gapY);
 
-        var sb = new System.Text.StringBuilder();
+        var sb = new StringBuilder();
         sb.Append($"<svg class=\"acc-bar-svg\" viewBox=\"0 0 460 {svgH}\" xmlns=\"http://www.w3.org/2000/svg\">");
 
         for (int i = 0; i < sorted.Count; i++)

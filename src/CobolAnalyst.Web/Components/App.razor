@@ -27,7 +27,18 @@
             var el = document.getElementById(id);
             if (el) el.scrollTop = el.scrollHeight;
         };
-    </script>
+        window.downloadTextFile = function (filename, content) {
+            var blob = new Blob([content], { type: 'text/plain' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+</script>
 </body>
 
 </html>
