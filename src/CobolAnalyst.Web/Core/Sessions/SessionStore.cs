@@ -111,18 +111,38 @@ public sealed class SessionStore
         foreach (var r in rulesEl.EnumerateArray())
         {
             total++;
-            var decision = r.TryGetProperty("Decision", out var d) ? d.GetString() : "Pending";
+            // ReadStringOrEnum handles both string ("Accepted") and integer (1) enum
+            // representations.  Sessions saved before the JSON serialiser was configured
+            // to emit string names will have numeric values.
+            var decision = r.TryGetProperty("Decision", out var d)
+                ? ReadStringOrEnum(d)
+                : "Pending";
+
+            // ReviewDecision: Pending=0, Accepted=1, Rejected=2, Flagged=3
             switch (decision)
             {
-                case "Accepted": accepted++; break;
-                case "Rejected": rejected++; break;
-                case "Flagged":  flagged++;  break;
+                case "Accepted": case "1": accepted++; break;
+                case "Rejected": case "2": rejected++; break;
+                case "Flagged":  case "3": flagged++;  break;
+                // "Pending" / "0" / anything else → counts as pending (no-op here)
             }
         }
         int pending = total - accepted - rejected - flagged;
         int decided = accepted + rejected + flagged;
         return (decided, accepted, rejected, flagged, pending, total);
     }
+
+    /// <summary>
+    /// Reads a JSON element as a string regardless of whether it was serialised as a
+    /// JSON string or a JSON number (integer enum).  Returns an empty string for any
+    /// other kind (null, object, array, …).
+    /// </summary>
+    private static string ReadStringOrEnum(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.String => el.GetString() ?? "",
+        JsonValueKind.Number => el.GetInt32().ToString(),
+        _                    => ""
+    };
 }
 
 /// <summary>Lightweight session summary for the sessions list page.</summary>
