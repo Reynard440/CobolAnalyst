@@ -1,55 +1,72 @@
 using CobolAnalyst.Web.Models;
-using CobolAnalyst.Web.Core.Llm;
 
 namespace CobolAnalyst.Web.Core.Validation;
 
 /// <summary>
-/// Compares extracted rules against a ground truth set to produce a ValidationReport.
-/// Uses Jaccard content-word similarity for matching.
+/// Compares extracted rules against a ground truth set using LCS-based character similarity.
+///
+/// SIMILARITY(a, b) = 2.0 * lcsLength / (a.Length + b.Length)
+/// where a and b are the normalised (lower-case, alphanumeric + spaces) concatenations of
+/// the label/description (extracted) and ruleText (ground truth).
+///
+/// An additional +0.05 bonus is awarded when the extracted rule's type matches the ground
+/// truth category (case-insensitive), capped at 1.0.
+///
+/// Default threshold: 0.40.
 /// </summary>
 public sealed class ValidationService
 {
-    /// <summary>Runs validation and returns the full report.</summary>
-    public ValidationReport Validate(
-        AnalysisSession session,
-        GroundTruthSet groundTruth,
-        double threshold = 0.40)
-    {
-        var report = new ValidationReport
-        {
-            SessionId   = session.Id,
-            SessionName = session.Name,
-            Threshold   = threshold
-        };
+    // ── Public API ────────────────────────────────────────────────────────────
 
-        var extracted = session.Rules.ToList();
-        var gtRules   = groundTruth.Rules.ToList();
+    /// <summary>
+    /// Runs validation and returns the full <see cref="ValidationResult"/>.
+    /// </summary>
+    /// <param name="extractedRules">Rules produced by AnalysisOrchestrator.</param>
+    /// <param name="groundTruth">Hand-verified reference rules.</param>
+    /// <param name="threshold">Minimum LCS similarity to count as a true positive.</param>
+    /// <param name="sessionName">Display name recorded in the result.</param>
+    /// <param name="modelName">Ollama model tag recorded in the result.</param>
+    /// <param name="sessionId">Session ID recorded in the result.</param>
+    /// <param name="templateId">Active prompt template ID recorded in the result.</param>
+    public ValidationResult RunValidation(
+        List<ExtractedRule>    extractedRules,
+        List<GroundTruthRule>  groundTruth,
+        float                  threshold   = 0.40f,
+        string                 sessionName = "",
+        string                 modelName   = "",
+        string                 sessionId   = "",
+        string                 templateId  = "")
+    {
+        var result = new ValidationResult
+        {
+            SessionId        = sessionId,
+            SessionName      = sessionName,
+            ModelName        = modelName,
+            TemplateId       = templateId,
+            Threshold        = threshold,
+            GroundTruthCount = groundTruth.Count
+        };
 
         var matchedGtIds        = new HashSet<string>();
         var matchedExtractedIds = new HashSet<string>();
 
-        // Greedy best-match: for each extracted rule find best GT match above threshold
-        foreach (var ext in extracted)
+        // ── Greedy best-match ─────────────────────────────────────────────────
+        // For each extracted rule find the best un-claimed GT rule above threshold.
+        foreach (var ext in extractedRules)
         {
-            var extWords = PromptBuilder.ContentWords($"{ext.Label} {ext.Description}");
-            double bestSim  = 0;
+            float         bestSim = 0f;
             GroundTruthRule? bestGt = null;
 
-            foreach (var gt in gtRules)
+            foreach (var gt in groundTruth)
             {
                 if (matchedGtIds.Contains(gt.Id)) continue;
-                var gtWords = PromptBuilder.ContentWords($"{gt.Label} {gt.Description}");
-                double sim  = Jaccard(extWords, gtWords);
-                if (sim > bestSim)
-                {
-                    bestSim = sim;
-                    bestGt  = gt;
-                }
+                float sim = ComputeSimilarity(ext, gt);
+                if (sim > bestSim) { bestSim = sim; bestGt = gt; }
             }
 
             if (bestGt is not null && bestSim >= threshold)
             {
-                report.TruePositives.Add(new MatchedRule
+                result.TruePositives.Add(new MatchedPair
                 {
                     Extracted   = ext,
                     GroundTruth = bestGt,
@@ -60,43 +77,46 @@ public sealed class ValidationService
             }
         }
 
-        // False positives: extracted rules not matched to any GT rule
-        foreach (var ext in extracted.Where(e => !matchedExtractedIds.Contains(e.Id)))
+        // ── False positives ───────────────────────────────────────────────────
+        foreach (var ext in extractedRules.Where(e => !matchedExtractedIds.Contains(e.Id)))
         {
-            var (pattern, reason) = ClassifyFp(ext);
-            report.FalsePositives.Add(new FalsePositiveResult
+            result.FalsePositives.Add(new FalsePositive
             {
-                Rule          = ext,
-                Pattern       = pattern,
-                PatternReason = reason
+                Rule   = ext,
+                Reason = DiagnoseFP(ext, groundTruth, threshold)
             });
         }
 
-        // False negatives: GT rules not matched by any extracted rule
-        foreach (var gt in gtRules.Where(g => !matchedGtIds.Contains(g.Id)))
+        // ── False negatives ───────────────────────────────────────────────────
+        foreach (var gt in groundTruth.Where(g => !matchedGtIds.Contains(g.Id)))
         {
-            var (cause, reason) = DiagnoseFn(gt, extracted);
-            report.FalseNegatives.Add(new FalseNegativeResult
+            result.FalseNegatives.Add(new FalseNegative
             {
-                Rule        = gt,
-                Cause       = cause,
-                CauseReason = reason
+                Rule   = gt,
+                Reason = DiagnoseFN(gt, extractedRules)
             });
         }
 
-        // Per-category metrics
-        var allTypes = extracted.Select(r => r.Type.ToString())
-            .Concat(gtRules.Select(r => r.Type))
-            .Distinct()
-            .OrderBy(t => t);
+        // ── Per-category metrics ──────────────────────────────────────────────
+        var categories = extractedRules.Select(r => r.Type.ToString())
+            .Concat(groundTruth.Select(r => r.Category))
+            .Where(c => !string.IsNullOrEmpty(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c);
 
-        foreach (var cat in allTypes)
+        foreach (var cat in categories)
         {
-            var tp = report.TruePositives.Count(m => m.Extracted.Type.ToString() == cat || m.GroundTruth.Type == cat);
-            var fp = report.FalsePositives.Count(f => f.Rule.Type.ToString() == cat);
-            var fn = report.FalseNegatives.Count(f => f.Rule.Type == cat);
+            int tp = result.TruePositives.Count(m =>
+                m.Extracted.Type.ToString().Equals(cat, StringComparison.OrdinalIgnoreCase) ||
+                m.GroundTruth.Category.Equals(cat, StringComparison.OrdinalIgnoreCase));
+            int fp = result.FalsePositives.Count(f =>
+                f.Rule.Type.ToString().Equals(cat, StringComparison.OrdinalIgnoreCase));
+            int fn = result.FalseNegatives.Count(f =>
+                f.Rule.Category.Equals(cat, StringComparison.OrdinalIgnoreCase));
+
             if (tp + fp + fn == 0) continue;
-            report.ByCategory.Add(new CategoryMetrics
+
+            result.ByCategory.Add(new CategoryResult
             {
                 Category       = cat,
                 TruePositives  = tp,
@@ -105,92 +125,164 @@ public sealed class ValidationService
             });
         }
 
-        report.GuidanceItems = BuildGuidance(report);
-        return report;
+        result.GuidanceItems = BuildGuidance(result);
+        return result;
     }
 
-    private static double Jaccard(HashSet<string> a, HashSet<string> b)
+    // ── LCS similarity ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// SIMILARITY(a,b) = 2.0 * lcsLength / (a.Length + b.Length)
+    /// Applied to normalised (lower-case, alphanumeric + single spaces) strings.
+    /// +0.05 category bonus, capped at 1.0.
+    /// </summary>
+    private static float ComputeSimilarity(ExtractedRule ext, GroundTruthRule gt)
     {
-        if (a.Count == 0 && b.Count == 0) return 0;
-        int intersection = a.Count(w => b.Contains(w));
-        int union        = a.Count + b.Count - intersection;
-        return union == 0 ? 0 : (double)intersection / union;
+        var a = Normalise($"{ext.Label} {ext.Description}");
+        var b = Normalise(gt.RuleText);
+
+        if (a.Length + b.Length == 0) return 0f;
+
+        int lcs = LcsLength(a, b);
+        float sim = 2.0f * lcs / (a.Length + b.Length);
+
+        // Category bonus
+        if (!string.IsNullOrEmpty(gt.Category) &&
+            ext.Type.ToString().Equals(gt.Category, StringComparison.OrdinalIgnoreCase))
+            sim += 0.05f;
+
+        return Math.Min(1.0f, sim);
     }
 
-    private static (FpPattern pattern, string reason) ClassifyFp(ExtractedRule rule)
+    /// <summary>
+    /// Normalises a string to lower-case letters and digits with collapsed single spaces.
+    /// </summary>
+    private static string Normalise(string s)
     {
-        var desc = rule.Description.ToLowerInvariant();
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s.ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(c))
+                sb.Append(c);
+            else if (char.IsWhiteSpace(c) && sb.Length > 0 && sb[^1] != ' ')
+                sb.Append(' ');
+        }
+        // Trim trailing space
+        if (sb.Length > 0 && sb[^1] == ' ')
+            sb.Length--;
+        return sb.ToString();
+    }
 
-        if (rule.Confidence == ConfidenceLevel.Low)
-            return (FpPattern.LowConfidence, "LLM-reported confidence is Low; rule may be speculative.");
+    /// <summary>
+    /// Rolling-array LCS length in O(m·n) time, O(n) space.
+    /// </summary>
+    private static int LcsLength(string a, string b)
+    {
+        int m = a.Length, n = b.Length;
+        if (m == 0 || n == 0) return 0;
+
+        var prev = new int[n + 1];
+        var curr = new int[n + 1];
+
+        for (int i = 1; i <= m; i++)
+        {
+            for (int j = 1; j <= n; j++)
+                curr[j] = a[i - 1] == b[j - 1]
+                    ? prev[j - 1] + 1
+                    : Math.Max(prev[j], curr[j - 1]);
+
+            (prev, curr) = (curr, prev);
+            Array.Clear(curr, 0, n + 1);
+        }
+
+        return prev[n];
+    }
+
+    // ── Diagnostic helpers ────────────────────────────────────────────────────
+
+    private static string DiagnoseFP(
+        ExtractedRule          ext,
+        List<GroundTruthRule>  groundTruth,
+        float                  threshold)
+    {
+        var desc = ext.Description.ToLowerInvariant();
+
+        if (ext.Confidence == ConfidenceLevel.Low)
+            return "LLM-reported confidence is Low — rule may be speculative.";
 
         if (desc.Length < 40)
-            return (FpPattern.TrivialAssignment, "Description is very short, suggesting a trivial assignment or constant.");
+            return "Description is very short, suggesting a trivial statement with no GT match.";
 
-        if (desc.Contains("display") || desc.Contains("print") || desc.Contains("log") ||
-            desc.Contains("trace")   || desc.Contains("filler"))
-            return (FpPattern.InfrastructureBoilerplate, "Describes infrastructure output or structural padding with no business logic.");
+        if (desc.Contains("display") || desc.Contains("print") || desc.Contains("filler") ||
+            desc.Contains("trace")   || desc.Contains("log"))
+            return "Describes infrastructure output or structural padding; no business GT rule exists.";
 
-        if (!desc.Contains("if") && !desc.Contains("when") && !desc.Contains("calculat") &&
-            !desc.Contains("valid") && !desc.Contains("check") && !desc.Contains("comput"))
-            return (FpPattern.OverlyGeneric, "Description lacks specific business vocabulary; rule may be too generic.");
-
-        return (FpPattern.Unclassified, "No clear FP pattern detected; manual review recommended.");
+        // Find best partial match to give context
+        float best = groundTruth.Max(gt => ComputeSimilarity(ext, gt));
+        return best < 0.15f
+            ? "No ground truth rule has any meaningful similarity; the extraction may be spurious."
+            : $"Best GT similarity was {best:F2}, below the threshold of {threshold:F2}.";
     }
 
-    private static (FnCause cause, string reason) DiagnoseFn(GroundTruthRule gt, List<ExtractedRule> extracted)
+    private static string DiagnoseFN(
+        GroundTruthRule      gt,
+        List<ExtractedRule>  extractedRules)
     {
-        var gtWords = PromptBuilder.ContentWords($"{gt.Label} {gt.Description}");
+        bool typePresent = extractedRules.Any(e =>
+            e.Type.ToString().Equals(gt.Category, StringComparison.OrdinalIgnoreCase));
 
-        // Check if type exists at all in extracted
-        bool typePresent = extracted.Any(e => e.Type.ToString().Equals(gt.Type, StringComparison.OrdinalIgnoreCase));
         if (!typePresent)
-            return (FnCause.TypeAbsent, $"No extracted rule of type '{gt.Type}' was found; the prompt may not surface this category.");
+            return $"No extracted rule of category '{gt.Category}' was found — the prompt may not surface this category.";
 
-        if (gt.Description.Split(' ').Length < 8)
-            return (FnCause.ShortDescription, "Ground truth description is short; the LLM had little signal to match against.");
+        if (gt.RuleText.Split(' ').Length < 8)
+            return "Ground truth rule text is very short; the LLM had little signal to match against.";
 
-        // If GT description mentions complex constructs
-        var desc = gt.Description.ToLowerInvariant();
-        if (desc.Contains("nested") || desc.Contains("recursive") || desc.Contains("loop") ||
-            desc.Contains("accumulate") || desc.Contains("iteration"))
-            return (FnCause.ComplexLogic, "Ground truth rule involves complex iterative or nested logic the LLM may have collapsed.");
+        var text = gt.RuleText.ToLowerInvariant();
+        if (text.Contains("nested") || text.Contains("recursive") ||
+            text.Contains("loop")   || text.Contains("iteration"))
+            return "Rule involves complex iterative or nested logic the LLM may have collapsed or missed.";
 
-        // Find the best partial match to check if evidence exists
-        double best = extracted.Max(e =>
+        float best = extractedRules.Max(e =>
         {
-            var ew = PromptBuilder.ContentWords($"{e.Label} {e.Description}");
-            return Jaccard(gtWords, ew);
+            var a = Normalise($"{e.Label} {e.Description}");
+            var b = Normalise(gt.RuleText);
+            if (a.Length + b.Length == 0) return 0f;
+            return 2.0f * LcsLength(a, b) / (a.Length + b.Length);
         });
 
-        if (best < 0.10)
-            return (FnCause.NoEvidence, "No extracted rule has any meaningful word overlap; the source chunk may have been skipped or truncated.");
-
-        return (FnCause.ComplexLogic, "Rule was partially detected but fell below the similarity threshold.");
+        return best < 0.10f
+            ? "No extracted rule overlaps meaningfully; the source chunk may have been skipped or truncated."
+            : $"Best extraction similarity was {best:F2} — partially detected but below threshold.";
     }
 
-    private static List<string> BuildGuidance(ValidationReport r)
+    // ── Guidance builder ──────────────────────────────────────────────────────
+
+    private static List<string> BuildGuidance(ValidationResult r)
     {
         var items = new List<string>();
 
-        if (r.Recall < 0.6)
+        if (r.Recall < 0.6f)
             items.Add($"Recall is low ({r.Recall:P0}). Consider lowering the complexity threshold or adding more source files to the session.");
 
-        if (r.Precision < 0.6)
+        if (r.Precision < 0.6f)
             items.Add($"Precision is low ({r.Precision:P0}). Review the suppression list in Workshop — infrastructure boilerplate may be leaking through.");
 
-        var lowConfFp = r.FalsePositives.Count(f => f.Pattern == FpPattern.LowConfidence);
+        var lowConfFp = r.FalsePositives.Count(f =>
+            f.Reason.Contains("Low", StringComparison.OrdinalIgnoreCase));
         if (lowConfFp >= 2)
-            items.Add($"{lowConfFp} FPs are Low-confidence extractions. Add a prompt instruction to omit rules where confidence is Low.");
+            items.Add($"{lowConfFp} FPs are low-confidence extractions. Add a prompt instruction in Workshop to omit rules where confidence is Low.");
 
-        var typeAbsent = r.FalseNegatives.Where(f => f.Cause == FnCause.TypeAbsent)
-                                         .Select(f => f.Rule.Type).Distinct().ToList();
-        if (typeAbsent.Count > 0)
-            items.Add($"Type(s) {string.Join(", ", typeAbsent)} never appear in extracted rules. Add a worked example for these types in Workshop.");
+        var missingCats = r.FalseNegatives
+            .Where(f => f.Reason.Contains("category", StringComparison.OrdinalIgnoreCase))
+            .Select(f => f.Rule.Category)
+            .Distinct()
+            .ToList();
+        if (missingCats.Count > 0)
+            items.Add($"Category '{string.Join(", ", missingCats)}' never appears in extracted rules. Add a worked example for that category in Workshop.");
 
         var worstCat = r.ByCategory.OrderBy(c => c.F1).FirstOrDefault();
-        if (worstCat is not null && worstCat.F1 < 0.5)
-            items.Add($"Category '{worstCat.Category}' has the lowest F1 ({worstCat.F1:P0}). Target this category first when tuning prompts.");
+        if (worstCat is not null && worstCat.F1 < 0.5f)
+            items.Add($"Category '{worstCat.Category}' has the lowest F1 ({worstCat.F1:P0}). Target it first when tuning prompts.");
 
         if (items.Count == 0)
             items.Add("Results look good. Continue iterating to push F1 above 0.85 for all categories.");

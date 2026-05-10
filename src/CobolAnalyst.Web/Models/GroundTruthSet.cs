@@ -4,9 +4,15 @@ namespace CobolAnalyst.Web.Models;
 public sealed class GroundTruthRule
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
-    public string Label { get; set; } = string.Empty;
-    public string Type { get; set; } = string.Empty;
-    public string Description { get; set; } = string.Empty;
+
+    /// <summary>Rule category matching the extraction prompt categories (e.g. Calculation, Validation).</summary>
+    public string Category { get; set; } = string.Empty;
+
+    /// <summary>Plain-English description of the business rule.</summary>
+    public string RuleText { get; set; } = string.Empty;
+
+    /// <summary>Optional reference to source document, paragraph, or section.</summary>
+    public string? SourceRef { get; set; }
 }
 
 /// <summary>A curated set of ground truth rules for a specific source file or session.</summary>

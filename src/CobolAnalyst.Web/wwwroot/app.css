@@ -1230,3 +1230,123 @@ body {
 #blazor-error-ui a { color: #fff; font-weight: 600; }
 #blazor-error-ui .dismiss { float: right; cursor: pointer; opacity: 0.7; }
 #blazor-error-ui .dismiss:hover { opacity: 1; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ACCURACY DASHBOARD — validation pipeline UI
+═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── File upload zone ── */
+.gt-upload-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 120px;
+    border: 2px dashed var(--border-default);
+    border-radius: var(--r-md);
+    background: var(--bg-input);
+    padding: 16px;
+    cursor: pointer;
+    transition: border-color 0.18s, background 0.18s;
+    text-align: center;
+    position: relative;
+}
+.gt-upload-zone:hover   { border-color: var(--brand-light); background: var(--bg-overlay); }
+.gt-upload-zone.drag-over { border-color: var(--brand); background: rgba(99,102,241,0.06); }
+.gt-upload-zone input[type=file] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+.upload-icon   { font-size: 26px; }
+.upload-hint   { font-size: 13px; color: var(--text-2); margin: 0; }
+.upload-hint-sub { font-size: 11.5px; color: var(--text-3); margin: 0; }
+.upload-hint-sub code {
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 11px;
+    background: var(--bg-overlay);
+    border: 1px solid var(--border-default);
+    border-radius: var(--r-sm);
+    padding: 1px 5px;
+    color: var(--text-code);
+}
+.upload-success { font-size: 13px; font-weight: 600; color: var(--green); margin: 0; }
+
+/* Clear GT button inside upload zone */
+.acc-clear-btn {
+    margin-top: 4px;
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border-default);
+    background: var(--bg-overlay);
+    color: var(--text-3);
+    cursor: pointer;
+    z-index: 1;
+    position: relative;
+    transition: color 0.15s, border-color 0.15s;
+}
+.acc-clear-btn:hover { color: var(--red); border-color: rgba(244,63,94,0.4); }
+
+/* ── Run metadata ── */
+.acc-run-meta {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-2);
+    margin-left: 12px;
+}
+
+/* ── Metric chip extras ── */
+.metric-chip.metric-gt .metric-value { color: var(--brand-light); }
+
+/* ── Tab badges ── */
+.tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 0 5px;
+    margin-left: 5px;
+}
+.tab-badge-tp   { background: rgba(76,175,80,0.2);  color: #4caf50; }
+.tab-badge-fp   { background: rgba(244,63,94,0.15); color: var(--red); }
+.tab-badge-fn   { background: rgba(255,152,0,0.18); color: #ff9800; }
+.tab-badge-hist { background: rgba(99,102,241,0.15);color: var(--brand-light); }
+
+/* ── SVG bar chart ── */
+.acc-chart-wrap   { margin-bottom: 8px; }
+.acc-chart-title  { font-size: 11px; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 10px; }
+.acc-bar-svg      { width: 100%; max-width: 460px; overflow: visible; }
+
+/* ── Match cards ── */
+.match-card      { background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 10px; }
+.tp-card         { border-left: 3px solid #4caf50; }
+.fp-card         { border-left: 3px solid var(--red); }
+.fn-card         { border-left: 3px solid #ff9800; }
+.match-row       { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.match-tag       { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: var(--r-sm); text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+.match-extracted { background: rgba(99,102,241,0.15); color: var(--brand-light); }
+.match-gt        { background: rgba(76,175,80,0.15);  color: #81c784; }
+.match-source    { font-size: 11px; color: var(--text-3); font-style: italic; }
+.match-desc      { font-size: 13px; color: var(--text-2); margin: 6px 0 0; line-height: 1.55; }
+.reason-icon     { margin-right: 4px; }
+.match-reason    { font-size: 12px; color: var(--text-3); margin: 6px 0 0; font-style: italic; line-height: 1.5; }
+.sim-badge       { font-size: 10.5px; font-family: "Cascadia Code", Consolas, monospace; background: rgba(99,102,241,0.12); color: var(--brand-light); border-radius: var(--r-sm); padding: 1px 7px; }
+
+/* ── History table current row ── */
+.history-current { background: rgba(99,102,241,0.07); }
+
+/* ── Empty state variant for Accuracy ── */
+.acc-empty        { padding: 48px 24px; }
+.acc-empty-icon   { font-size: 40px; margin-bottom: 12px; }
+.acc-format-box   { margin-top: 24px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--r-md); padding: 14px 18px; text-align: left; display: inline-block; max-width: 480px; }
+.acc-format-title { font-size: 11px; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.6px; margin: 0 0 8px; }
+.acc-format-pre   { font-family: "Cascadia Code", "Fira Code", Consolas, monospace; font-size: 11.5px; color: var(--text-code); margin: 0; white-space: pre; line-height: 1.7; background: none; border: none; padding: 0; }

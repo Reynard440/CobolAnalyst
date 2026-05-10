@@ -1,81 +1,96 @@
 namespace CobolAnalyst.Web.Models;
 
-/// <summary>Why an extracted rule was classified as a false positive.</summary>
-public enum FpPattern
+// ─── Result models ────────────────────────────────────────────────────────────
+
+/// <summary>An extracted rule paired with the ground truth rule it matched.</summary>
+public sealed class MatchedPair
 {
-    TrivialAssignment,
-    InfrastructureBoilerplate,
-    LowConfidence,
-    OverlyGeneric,
-    Unclassified
+    public ExtractedRule Extracted { get; set; } = new();
+    public GroundTruthRule GroundTruth { get; set; } = new();
+    public float Similarity { get; set; }
 }
 
-/// <summary>Why a ground truth rule was missed (false negative).</summary>
-public enum FnCause
+/// <summary>An extracted rule that could not be matched to any ground truth entry.</summary>
+public sealed class FalsePositive
 {
-    ShortDescription,
-    ComplexLogic,
-    TypeAbsent,
-    NoEvidence
+    public ExtractedRule Rule { get; set; } = new();
+    public string Reason { get; set; } = string.Empty;
 }
 
-/// <summary>Precision / Recall / F1 for a single rule type category.</summary>
-public sealed class CategoryMetrics
+/// <summary>A ground truth rule that was not matched by any extracted rule.</summary>
+public sealed class FalseNegative
+{
+    public GroundTruthRule Rule { get; set; } = new();
+    public string Reason { get; set; } = string.Empty;
+}
+
+/// <summary>Precision / Recall / F1 for a single rule category.</summary>
+public sealed class CategoryResult
 {
     public string Category { get; set; } = string.Empty;
     public int TruePositives { get; set; }
     public int FalsePositives { get; set; }
     public int FalseNegatives { get; set; }
-    public double Precision => TruePositives + FalsePositives == 0 ? 0 : (double)TruePositives / (TruePositives + FalsePositives);
-    public double Recall    => TruePositives + FalseNegatives == 0 ? 0 : (double)TruePositives / (TruePositives + FalseNegatives);
-    public double F1        => Precision + Recall == 0 ? 0 : 2 * Precision * Recall / (Precision + Recall);
+
+    public float Precision => TruePositives + FalsePositives == 0
+        ? 0f : (float)TruePositives / (TruePositives + FalsePositives);
+
+    public float Recall => TruePositives + FalseNegatives == 0
+        ? 0f : (float)TruePositives / (TruePositives + FalseNegatives);
+
+    public float F1 => Precision + Recall == 0
+        ? 0f : 2f * Precision * Recall / (Precision + Recall);
 }
 
-/// <summary>An extracted rule matched to a ground truth rule.</summary>
-public sealed class MatchedRule
+/// <summary>Full validation result for a single run.</summary>
+public sealed class ValidationResult
 {
-    public ExtractedRule Extracted { get; set; } = new();
-    public GroundTruthRule GroundTruth { get; set; } = new();
-    public double Similarity { get; set; }
-}
-
-/// <summary>An extracted rule that could not be matched to any ground truth entry.</summary>
-public sealed class FalsePositiveResult
-{
-    public ExtractedRule Rule { get; set; } = new();
-    public FpPattern Pattern { get; set; }
-    public string PatternReason { get; set; } = string.Empty;
-}
-
-/// <summary>A ground truth rule that was not found among the extracted rules.</summary>
-public sealed class FalseNegativeResult
-{
-    public GroundTruthRule Rule { get; set; } = new();
-    public FnCause Cause { get; set; }
-    public string CauseReason { get; set; } = string.Empty;
-}
-
-/// <summary>Full validation report comparing extracted rules against a ground truth set.</summary>
-public sealed class ValidationReport
-{
+    public string Id { get; set; } = Guid.NewGuid().ToString();
     public string SessionId { get; set; } = string.Empty;
     public string SessionName { get; set; } = string.Empty;
+    public string ModelName { get; set; } = string.Empty;
+    public string TemplateId { get; set; } = string.Empty;
     public DateTime RunAt { get; set; } = DateTime.UtcNow;
-    public double Threshold { get; set; }
+    public float Threshold { get; set; }
+    public int GroundTruthCount { get; set; }
 
-    public List<MatchedRule> TruePositives { get; set; } = [];
-    public List<FalsePositiveResult> FalsePositives { get; set; } = [];
-    public List<FalseNegativeResult> FalseNegatives { get; set; } = [];
+    public List<MatchedPair> TruePositives { get; set; } = [];
+    public List<FalsePositive> FalsePositives { get; set; } = [];
+    public List<FalseNegative> FalseNegatives { get; set; } = [];
+    public List<CategoryResult> ByCategory { get; set; } = [];
+    public List<string> GuidanceItems { get; set; } = [];
 
+    // ── Computed metrics ───────────────────────────────────────────────────────
     public int TpCount => TruePositives.Count;
     public int FpCount => FalsePositives.Count;
     public int FnCount => FalseNegatives.Count;
 
-    public double Precision => TpCount + FpCount == 0 ? 0 : (double)TpCount / (TpCount + FpCount);
-    public double Recall    => TpCount + FnCount == 0 ? 0 : (double)TpCount / (TpCount + FnCount);
-    public double F1        => Precision + Recall == 0 ? 0 : 2 * Precision * Recall / (Precision + Recall);
+    public float Precision => TpCount + FpCount == 0
+        ? 0f : (float)TpCount / (TpCount + FpCount);
 
-    public List<CategoryMetrics> ByCategory { get; set; } = [];
+    public float Recall => TpCount + FnCount == 0
+        ? 0f : (float)TpCount / (TpCount + FnCount);
 
-    public List<string> GuidanceItems { get; set; } = [];
+    public float F1 => Precision + Recall == 0
+        ? 0f : 2f * Precision * Recall / (Precision + Recall);
+}
+
+// ─── Summary model (lightweight, for history list) ────────────────────────────
+
+/// <summary>Lightweight summary of a past validation run for display in the History tab.</summary>
+public sealed class ValidationSummary
+{
+    public string Id { get; set; } = string.Empty;
+    public string SessionId { get; set; } = string.Empty;
+    public string SessionName { get; set; } = string.Empty;
+    public string ModelName { get; set; } = string.Empty;
+    public DateTime RunAt { get; set; }
+    public float F1 { get; set; }
+    public float Precision { get; set; }
+    public float Recall { get; set; }
+    public int TpCount { get; set; }
+    public int FpCount { get; set; }
+    public int FnCount { get; set; }
+    public int GroundTruthCount { get; set; }
+    public float Threshold { get; set; }
 }

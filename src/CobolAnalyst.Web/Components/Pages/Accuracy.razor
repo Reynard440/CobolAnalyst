@@ -1,54 +1,83 @@
 @page "/accuracy"
 @rendermode InteractiveServer
-@using System.Text.Json
 @using CobolAnalyst.Web.Core.State
 @using CobolAnalyst.Web.Core.Validation
+@using CobolAnalyst.Web.Core.Sessions
+@using CobolAnalyst.Web.Core.Prompts
 @using CobolAnalyst.Web.Models
+@using Microsoft.AspNetCore.Components.Forms
 
-@inject AnalysisStateService State
-@inject SessionStore Sessions
-@inject ValidationService Validator
+@inject AnalysisStateService  State
+@inject SessionStore          SessionStore
+@inject ValidationService     Validator
+@inject ValidationStore       ValStore
+@inject GroundTruthParser     Parser
+@inject PromptTemplateStore   Templates
 
 <PageTitle>CobolAnalyst — Accuracy</PageTitle>
 
 <div class="analyst-layout">
 
-    <!-- ── Left panel ── -->
+    <!-- ═══════════════════════════════ LEFT SIDEBAR ══════════════════════════ -->
     <aside class="sidebar">
+
+        <!-- Session selector -->
         <div class="sidebar-section">
             <span class="sidebar-label">Session</span>
             <select class="model-select" @bind="_selectedSessionId" disabled="@_running">
                 <option value="">— pick a session —</option>
                 @foreach (var s in _sessions)
                 {
-                    <option value="@s.Id">@s.Name</option>
+                    <option value="@s.Id">@s.Name (@s.RuleCount rules)</option>
                 }
             </select>
         </div>
 
+        <!-- Ground truth file upload -->
         <div class="sidebar-section">
-            <span class="sidebar-label">Ground Truth JSON</span>
-            <textarea class="gt-textarea" placeholder="@GroundTruthPlaceholder"
-                      @bind="_groundTruthJson" disabled="@_running" rows="12"></textarea>
-            @if (_jsonError is not null)
+            <span class="sidebar-label">Ground Truth File</span>
+            <label class="gt-upload-zone">
+                <InputFile OnChange="OnFileSelected" accept=".txt,.docx,.doc" disabled="@_running" />
+                @if (_gtRules.Count == 0 && !_parsing)
+                {
+                    <div class="upload-icon">&#x1F4C4;</div>
+                    <p class="upload-hint">Drop or click to upload</p>
+                    <p class="upload-hint-sub">.txt &nbsp;·&nbsp; .docx &nbsp;·&nbsp; .doc</p>
+                    <p class="upload-hint-sub">Format: <code>ID | Category | Rule text</code></p>
+                }
+                else if (_parsing)
+                {
+                    <div class="upload-icon">&#x23F3;</div>
+                    <p class="upload-hint">Parsing file…</p>
+                }
+                else
+                {
+                    <div class="upload-icon">&#x2705;</div>
+                    <p class="upload-success">@_gtRules.Count rule@(_gtRules.Count == 1 ? "" : "s") loaded</p>
+                    <p class="upload-hint-sub">@_gtFileName</p>
+                    <button class="acc-clear-btn" @onclick="ClearGroundTruth" type="button" disabled="@_running">&#x2715; Clear</button>
+                }
+            </label>
+            @if (_parseError is not null)
             {
-                <div class="error-msg" style="margin-top:6px;">@_jsonError</div>
+                <div class="error-msg" style="margin-top:6px;">@_parseError</div>
             }
         </div>
 
+        <!-- Threshold slider -->
         <div class="sidebar-section">
-            <span class="sidebar-label">Match Threshold: @_threshold.ToString("F2")</span>
+            <span class="sidebar-label">Similarity Threshold: @_threshold.ToString("F2")</span>
             <input type="range" min="0.10" max="0.90" step="0.05"
                    @bind="_threshold" @bind:event="oninput"
                    style="width:100%;accent-color:var(--accent-blue);"
                    disabled="@_running" />
-            <small style="color:var(--text-secondary);">Jaccard similarity required for a true-positive match</small>
+            <small style="color:var(--text-secondary);">LCS similarity required for a TP match</small>
         </div>
 
+        <!-- Run button -->
         <div class="sidebar-section">
-            <button class="btn btn-primary" @onclick="RunValidation"
-                    disabled="@(!CanRun)">
-                @(_running ? "Running…" : "Run Validation")
+            <button class="btn btn-primary" @onclick="RunValidation" disabled="@(!CanRun)">
+                @(_running ? "Running…" : "▶  Run Validation")
             </button>
         </div>
 
@@ -56,263 +85,402 @@
         {
             <div class="error-msg">@_globalError</div>
         }
+
     </aside>
 
-    <!-- ── Right panel ── -->
+    <!-- ═══════════════════════════════ RIGHT PANEL ═══════════════════════════ -->
     <section class="panel">
-        @if (_report is null)
+
+        @if (_result is null && !_running)
         {
-            <div class="empty-state">
+            <div class="empty-state acc-empty">
+                <div class="acc-empty-icon">&#x1F4CA;</div>
                 <h3>Accuracy Dashboard</h3>
-                <p>Select a session, paste a ground truth JSON, and click Run Validation.</p>
-                <p style="margin-top:8px;font-size:13px;color:var(--text-secondary);">
-                    Ground truth format: <code>{"{"}"rules":[{"{"}"id":"...","label":"...","type":"...","description":"..."{"}"]}{"}"}</code>
-                </p>
+                <p>Select a session, upload a ground truth file, then click <strong>Run Validation</strong>.</p>
+                <div class="acc-format-box">
+                    <p class="acc-format-title">Ground truth .txt format</p>
+                    <pre class="acc-format-pre"># Comment lines start with #
+GT-001 | Calculation  | Hours beyond 40/week paid at 1.5× rate.
+GT-002 | Validation   | Employee ID must be numeric and 6 digits.
+GT-003 | Constraint   | Max order quantity must not exceed MAX-ORDER-QTY.</pre>
+                </div>
             </div>
         }
-        else
+        else if (_running)
         {
-            <!-- Metric header chips -->
+            <div class="empty-state"><p>Running validation…</p></div>
+        }
+        else if (_result is not null)
+        {
+            <!-- ── Metric chips ── -->
             <div class="page-header">
                 Accuracy Report
-                <span style="font-size:12px;font-weight:400;color:var(--text-secondary);margin-left:12px;">
-                    @_report.SessionName &bull; @_report.RunAt.ToString("yyyy-MM-dd HH:mm") UTC
+                <span class="acc-run-meta">
+                    @_result.SessionName &bull; @_result.RunAt.ToString("yyyy-MM-dd HH:mm") UTC
+                    @if (!string.IsNullOrEmpty(_result.ModelName))
+                    {<span> &bull; @_result.ModelName</span>}
                 </span>
             </div>
 
             <div class="metrics-header">
                 <div class="metric-chip metric-precision">
-                    <span class="metric-value">@_report.Precision.ToString("P0")</span>
+                    <span class="metric-value">@_result.Precision.ToString("P0")</span>
                     <span class="metric-label">Precision</span>
                 </div>
                 <div class="metric-chip metric-recall">
-                    <span class="metric-value">@_report.Recall.ToString("P0")</span>
+                    <span class="metric-value">@_result.Recall.ToString("P0")</span>
                     <span class="metric-label">Recall</span>
                 </div>
                 <div class="metric-chip metric-f1">
-                    <span class="metric-value">@_report.F1.ToString("P0")</span>
+                    <span class="metric-value">@_result.F1.ToString("P0")</span>
                     <span class="metric-label">F1</span>
                 </div>
                 <div class="metric-chip metric-tp">
-                    <span class="metric-value">@_report.TpCount</span>
+                    <span class="metric-value">@_result.TpCount</span>
                     <span class="metric-label">True Pos</span>
                 </div>
                 <div class="metric-chip metric-fp">
-                    <span class="metric-value">@_report.FpCount</span>
+                    <span class="metric-value">@_result.FpCount</span>
                     <span class="metric-label">False Pos</span>
                 </div>
                 <div class="metric-chip metric-fn">
-                    <span class="metric-value">@_report.FnCount</span>
+                    <span class="metric-value">@_result.FnCount</span>
                     <span class="metric-label">False Neg</span>
+                </div>
+                <div class="metric-chip metric-gt">
+                    <span class="metric-value">@_result.GroundTruthCount</span>
+                    <span class="metric-label">GT Rules</span>
                 </div>
             </div>
 
-            <!-- Tab strip -->
+            <!-- ── Tab strip ── -->
             <div class="tab-strip">
-                @foreach (var tab in new[] { "Overview", "False Positives", "False Negatives", "Guidance" })
+                @foreach (var tab in Tabs)
                 {
                     <button class="tab-btn @(_activeTab == tab ? "active" : "")"
                             @onclick="() => _activeTab = tab">
                         @tab
+                        @if (tab == "Matched"         && _result.TpCount > 0) { <span class="tab-badge tab-badge-tp">@_result.TpCount</span> }
+                        @if (tab == "False Positives" && _result.FpCount > 0) { <span class="tab-badge tab-badge-fp">@_result.FpCount</span> }
+                        @if (tab == "False Negatives" && _result.FnCount > 0) { <span class="tab-badge tab-badge-fn">@_result.FnCount</span> }
+                        @if (tab == "History"         && _history.Count > 0)  { <span class="tab-badge tab-badge-hist">@_history.Count</span> }
                     </button>
                 }
             </div>
 
-            <!-- Tab content -->
-            @if (_activeTab == "Overview")
-            {
-                <div class="tab-content">
-                    <table class="data-table">
-                        <thead>
-                            <tr><th>Category</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var cat in _report.ByCategory)
-                            {
-                                <tr>
-                                    <td>@cat.Category</td>
-                                    <td class="num">@cat.TruePositives</td>
-                                    <td class="num">@cat.FalsePositives</td>
-                                    <td class="num">@cat.FalseNegatives</td>
-                                    <td class="num">@cat.Precision.ToString("P0")</td>
-                                    <td class="num">@cat.Recall.ToString("P0")</td>
-                                    <td class="num f1-cell @F1Class(cat.F1)">@cat.F1.ToString("P0")</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
+            <!-- ── Tab content ── -->
+            <div class="tab-content">
 
-                    @if (_report.TruePositives.Count > 0)
+                @if (_activeTab == "Overview")
+                {
+                    @if (_result.ByCategory.Count > 0)
                     {
-                        <div class="section-header" style="margin-top:20px;">True Positives (@_report.TpCount)</div>
-                        @foreach (var m in _report.TruePositives)
+                        <!-- Inline SVG bar chart: F1 per category -->
+                        <div class="acc-chart-wrap">
+                            <p class="acc-chart-title">F1 score by category</p>
+                            @RenderBarChart()
+                        </div>
+
+                        <table class="data-table" style="margin-top:12px;">
+                            <thead>
+                                <tr>
+                                    <th>Category</th>
+                                    <th class="num">TP</th>
+                                    <th class="num">FP</th>
+                                    <th class="num">FN</th>
+                                    <th class="num">Precision</th>
+                                    <th class="num">Recall</th>
+                                    <th class="num">F1</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var cat in _result.ByCategory.OrderByDescending(c => c.F1))
+                                {
+                                    <tr>
+                                        <td>@cat.Category</td>
+                                        <td class="num">@cat.TruePositives</td>
+                                        <td class="num">@cat.FalsePositives</td>
+                                        <td class="num">@cat.FalseNegatives</td>
+                                        <td class="num">@cat.Precision.ToString("P0")</td>
+                                        <td class="num">@cat.Recall.ToString("P0")</td>
+                                        <td class="num f1-cell @F1Class(cat.F1)">@cat.F1.ToString("P0")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                    else
+                    {
+                        <div class="empty-state" style="padding:24px 0;">
+                            <p>No category breakdown — run validation with at least one extracted rule and one GT rule.</p>
+                        </div>
+                    }
+                }
+
+                else if (_activeTab == "Matched")
+                {
+                    @if (_result.TruePositives.Count == 0)
+                    {
+                        <div class="empty-state"><p>No matched pairs — every extracted rule fell below the similarity threshold.</p></div>
+                    }
+                    else
+                    {
+                        @foreach (var m in _result.TruePositives.OrderByDescending(p => p.Similarity))
                         {
                             <div class="match-card tp-card">
                                 <div class="match-row">
                                     <span class="match-tag match-extracted">Extracted</span>
                                     <strong>@m.Extracted.Label</strong>
-                                    <span class="badge badge-@m.Extracted.Type">@m.Extracted.Type</span>
+                                    <span class="badge">@m.Extracted.Type</span>
                                     <span class="sim-badge">sim @m.Similarity.ToString("F2")</span>
                                 </div>
-                                <div class="match-row" style="margin-top:4px;">
+                                <p class="match-desc">@m.Extracted.Description</p>
+                                <div class="match-row" style="margin-top:6px;">
                                     <span class="match-tag match-gt">Ground Truth</span>
-                                    <strong>@m.GroundTruth.Label</strong>
-                                    <span class="badge badge-@m.GroundTruth.Type">@m.GroundTruth.Type</span>
+                                    <strong>@m.GroundTruth.Id</strong>
+                                    <span class="badge">@m.GroundTruth.Category</span>
                                 </div>
+                                <p class="match-desc">@m.GroundTruth.RuleText</p>
                             </div>
                         }
                     }
-                </div>
-            }
+                }
 
-            @if (_activeTab == "False Positives")
-            {
-                <div class="tab-content">
-                    @if (_report.FalsePositives.Count == 0)
+                else if (_activeTab == "False Positives")
+                {
+                    @if (_result.FalsePositives.Count == 0)
                     {
                         <div class="empty-state"><p>No false positives — every extracted rule matched a ground truth entry.</p></div>
                     }
                     else
                     {
-                        <div class="fp-pattern-summary">
-                            @foreach (var grp in _report.FalsePositives.GroupBy(f => f.Pattern))
-                            {
-                                <div class="fp-pattern-chip fp-@grp.Key">@grp.Key <strong>×@grp.Count()</strong></div>
-                            }
-                        </div>
-                        @foreach (var fp in _report.FalsePositives)
+                        @foreach (var fp in _result.FalsePositives)
                         {
                             <div class="match-card fp-card">
                                 <div class="match-row">
-                                    <span class="badge badge-@fp.Rule.Type">@fp.Rule.Type</span>
+                                    <span class="badge">@fp.Rule.Type</span>
                                     <strong>@fp.Rule.Label</strong>
-                                    <span class="badge badge-@fp.Rule.Confidence">@fp.Rule.Confidence</span>
-                                    <span class="fp-pattern-label">@fp.Pattern</span>
+                                    <span class="badge">@fp.Rule.Confidence</span>
                                 </div>
                                 <p class="match-desc">@fp.Rule.Description</p>
-                                <p class="match-reason">@fp.PatternReason</p>
+                                <p class="match-reason"><span class="reason-icon">&#x26A0;</span> @fp.Reason</p>
                             </div>
                         }
                     }
-                </div>
-            }
+                }
 
-            @if (_activeTab == "False Negatives")
-            {
-                <div class="tab-content">
-                    @if (_report.FalseNegatives.Count == 0)
+                else if (_activeTab == "False Negatives")
+                {
+                    @if (_result.FalseNegatives.Count == 0)
                     {
                         <div class="empty-state"><p>No false negatives — all ground truth rules were matched.</p></div>
                     }
                     else
                     {
-                        @foreach (var fn in _report.FalseNegatives)
+                        @foreach (var fn in _result.FalseNegatives)
                         {
                             <div class="match-card fn-card">
                                 <div class="match-row">
-                                    <span class="badge badge-@fn.Rule.Type">@fn.Rule.Type</span>
-                                    <strong>@fn.Rule.Label</strong>
-                                    <span class="fn-cause-label">@fn.Cause</span>
+                                    <span class="badge">@fn.Rule.Category</span>
+                                    <strong>@fn.Rule.Id</strong>
+                                    @if (!string.IsNullOrEmpty(fn.Rule.SourceRef))
+                                    {<span class="match-source">@fn.Rule.SourceRef</span>}
                                 </div>
-                                <p class="match-desc">@fn.Rule.Description</p>
-                                <p class="match-reason">@fn.CauseReason</p>
+                                <p class="match-desc">@fn.Rule.RuleText</p>
+                                <p class="match-reason"><span class="reason-icon">&#x2139;</span> @fn.Reason</p>
                             </div>
                         }
                     }
-                </div>
-            }
+                }
 
-            @if (_activeTab == "Guidance")
-            {
-                <div class="tab-content">
+                else if (_activeTab == "History")
+                {
+                    @if (_history.Count == 0)
+                    {
+                        <div class="empty-state"><p>No previous validation runs saved yet.</p></div>
+                    }
+                    else
+                    {
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Session</th>
+                                    <th class="num">GT</th>
+                                    <th class="num">TP</th>
+                                    <th class="num">FP</th>
+                                    <th class="num">FN</th>
+                                    <th class="num">Precision</th>
+                                    <th class="num">Recall</th>
+                                    <th class="num">F1</th>
+                                    <th class="num">Thresh</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var h in _history)
+                                {
+                                    <tr class="@(_result?.Id == h.Id ? "history-current" : "")">
+                                        <td>@h.RunAt.ToString("MM-dd HH:mm")</td>
+                                        <td>@h.SessionName</td>
+                                        <td class="num">@h.GroundTruthCount</td>
+                                        <td class="num">@h.TpCount</td>
+                                        <td class="num">@h.FpCount</td>
+                                        <td class="num">@h.FnCount</td>
+                                        <td class="num">@h.Precision.ToString("P0")</td>
+                                        <td class="num">@h.Recall.ToString("P0")</td>
+                                        <td class="num f1-cell @F1Class(h.F1)">@h.F1.ToString("P0")</td>
+                                        <td class="num">@h.Threshold.ToString("F2")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                }
+
+                else if (_activeTab == "Guidance")
+                {
                     <div class="guidance-list">
-                        @foreach (var item in _report.GuidanceItems)
+                        @foreach (var item in _result.GuidanceItems)
                         {
                             <div class="guidance-item">
                                 <span class="guidance-icon">&#x2139;</span>
-                                @item
+                                <span>@item</span>
                             </div>
                         }
                     </div>
-                </div>
-            }
+                }
+
+            </div><!-- /tab-content -->
         }
+
     </section>
 </div>
 
 @code {
-    private List<SessionSummary> _sessions = [];
-    private string _selectedSessionId = "";
-    private string _groundTruthJson = "";
-    private double _threshold = 0.40;
-    private bool _running;
-    private string? _globalError;
-    private string? _jsonError;
-    private ValidationReport? _report;
-    private string _activeTab = "Overview";
+
+    // ── Tab list ──────────────────────────────────────────────────────────────
+    private static readonly string[] Tabs =
+        ["Overview", "Matched", "False Positives", "False Negatives", "History", "Guidance"];
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    private List<SessionSummary>    _sessions          = [];
+    private string                  _selectedSessionId = "";
+    private List<GroundTruthRule>   _gtRules           = [];
+    private string                  _gtFileName        = "";
+    private bool                    _parsing;
+    private float                   _threshold         = 0.40f;
+    private bool                    _running;
+    private string?                 _globalError;
+    private string?                 _parseError;
+    private ValidationResult?       _result;
+    private List<CobolAnalyst.Web.Models.ValidationSummary> _history = [];
+    private string                  _activeTab         = "Overview";
 
     private bool CanRun =>
         !_running &&
         !string.IsNullOrEmpty(_selectedSessionId) &&
-        !string.IsNullOrWhiteSpace(_groundTruthJson);
+        _gtRules.Count > 0;
 
-    private const string GroundTruthPlaceholder =
-        "{\n" +
-        "  \"description\": \"Ground truth for PAYROLL.cbl\",\n" +
-        "  \"rules\": [\n" +
-        "    {\n" +
-        "      \"id\": \"gt-001\",\n" +
-        "      \"label\": \"Overtime Hours Threshold\",\n" +
-        "      \"type\": \"Calculation\",\n" +
-        "      \"description\": \"Hours worked beyond 40 per week at 1.5x rate.\"\n" +
-        "    }\n" +
-        "  ]\n" +
-        "}";
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     protected override async Task OnInitializedAsync()
     {
-        _sessions = await Sessions.ListAsync();
-        // Pre-select the active session if one exists.
+        _sessions = await SessionStore.ListAsync();
+        _history  = await ValStore.ListAsync();
+
         if (State.Session is not null && _sessions.Any(s => s.Id == State.Session.Id))
             _selectedSessionId = State.Session.Id;
     }
 
-    private async Task RunValidation()
+    // ── File upload ───────────────────────────────────────────────────────────
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
     {
-        _globalError = null;
-        _jsonError = null;
-        _report = null;
-
-        GroundTruthSet? gt;
-        try
-        {
-            gt = JsonSerializer.Deserialize<GroundTruthSet>(_groundTruthJson,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            if (gt is null || gt.Rules.Count == 0)
-            {
-                _jsonError = "JSON parsed but no rules found. Check the format.";
-                return;
-            }
-        }
-        catch (JsonException ex)
-        {
-            _jsonError = $"Invalid JSON: {ex.Message}";
-            return;
-        }
-
-        _running = true;
+        _parseError = null;
+        _gtRules    = [];
+        _gtFileName = "";
+        _parsing    = true;
         StateHasChanged();
 
         try
         {
-            var session = await Sessions.LoadAsync(_selectedSessionId);
-            if (session is null)
+            var file    = e.File;
+            _gtFileName = file.Name;
+
+            const long MaxBytes = 10 * 1024 * 1024; // 10 MB
+            await using var stream = file.OpenReadStream(MaxBytes);
+
+            _gtRules = await Parser.ParseAsync(stream, file.Name);
+
+            if (_gtRules.Count == 0)
+                _parseError = "No rules found. Check the format: \"ID | Category | Rule text\".";
+        }
+        catch (Exception ex)
+        {
+            _parseError = $"Could not read file: {ex.Message}";
+            _gtRules    = [];
+        }
+        finally
+        {
+            _parsing = false;
+            StateHasChanged();
+        }
+    }
+
+    private void ClearGroundTruth()
+    {
+        _gtRules    = [];
+        _gtFileName = "";
+        _parseError = null;
+    }
+
+    // ── Run ───────────────────────────────────────────────────────────────────
+
+    private async Task RunValidation()
+    {
+        _globalError = null;
+        _result      = null;
+        _running     = true;
+        StateHasChanged();
+
+        try
+        {
+            var session = await SessionStore.LoadAsync(_selectedSessionId);
+            if (session is null) { _globalError = "Session not found on disk."; return; }
+
+            var template  = Templates.GetActive();
+            var modelName = State.SelectedModel;
+
+            var result = await Task.Run(() =>
+                Validator.RunValidation(
+                    session.Rules,
+                    _gtRules,
+                    _threshold,
+                    sessionName: session.Name,
+                    modelName:   modelName,
+                    sessionId:   session.Id,
+                    templateId:  template?.Id ?? ""));
+
+            await ValStore.SaveAsync(result);
+
+            // Record F1 against the active prompt template for Workshop history
+            if (template is not null)
             {
-                _globalError = "Session not found.";
-                return;
+                Templates.RecordValidation(template.Id, new TemplateValidationRecord
+                {
+                    SessionId      = session.Id,
+                    SessionName    = session.Name,
+                    F1             = result.F1,
+                    Precision      = result.Precision,
+                    Recall         = result.Recall,
+                    TruePositives  = result.TpCount,
+                    FalsePositives = result.FpCount,
+                    FalseNegatives = result.FnCount
+                });
             }
 
-            _report = await Task.Run(() => Validator.Validate(session, gt, _threshold));
+            _result    = result;
+            _history   = await ValStore.ListAsync();
             _activeTab = "Overview";
         }
         catch (Exception ex)
@@ -326,6 +494,49 @@
         }
     }
 
-    private static string F1Class(double f1) =>
-        f1 >= 0.75 ? "f1-high" : f1 >= 0.50 ? "f1-mid" : "f1-low";
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Renders an SVG bar chart for category F1 scores as a MarkupString so the
+    /// Razor engine does not mis-parse SVG &lt;text&gt; elements as Razor pseudo-elements.
+    /// </summary>
+    private MarkupString RenderBarChart()
+    {
+        if (_result is null || _result.ByCategory.Count == 0)
+            return (MarkupString)"";
+
+        const int barH   = 26;
+        const int gapY   = 8;
+        const int labelW = 150;
+        const int maxBarW = 240;
+
+        var sorted = _result.ByCategory.OrderByDescending(c => c.F1).ToList();
+        int svgH   = sorted.Count * (barH + gapY);
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"<svg class=\"acc-bar-svg\" viewBox=\"0 0 460 {svgH}\" xmlns=\"http://www.w3.org/2000/svg\">");
+
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            var cat  = sorted[i];
+            int y    = i * (barH + gapY);
+            int bw   = (int)(cat.F1 * maxBarW);
+            var fill = cat.F1 >= 0.75f ? "#4caf50" : cat.F1 >= 0.50f ? "#ff9800" : "#f44336";
+            var lbl  = System.Web.HttpUtility.HtmlEncode(TruncLabel(cat.Category, 18));
+            var pct  = System.Web.HttpUtility.HtmlEncode(cat.F1.ToString("P0"));
+
+            sb.Append($"<text x=\"0\" y=\"{y + barH - 7}\" font-size=\"12\" fill=\"#9e9e9e\" font-family=\"'Fira Code',monospace\">{lbl}</text>");
+            sb.Append($"<rect x=\"{labelW}\" y=\"{y + 2}\" width=\"{bw}\" height=\"{barH - 4}\" rx=\"4\" fill=\"{fill}\" opacity=\"0.85\"/>");
+            sb.Append($"<text x=\"{labelW + bw + 6}\" y=\"{y + barH - 7}\" font-size=\"12\" fill=\"#e0e0e0\" font-family=\"'Fira Code',monospace\">{pct}</text>");
+        }
+
+        sb.Append("</svg>");
+        return (MarkupString)sb.ToString();
+    }
+
+    private static string F1Class(float f1) =>
+        f1 >= 0.75f ? "f1-high" : f1 >= 0.50f ? "f1-mid" : "f1-low";
+
+    private static string TruncLabel(string s, int max) =>
+        s.Length <= max ? s : s[..(max - 1)] + "…";
 }

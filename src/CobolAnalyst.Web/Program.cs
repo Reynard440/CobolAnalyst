@@ -41,7 +41,9 @@ builder.Services.AddSingleton<KnowledgeBaseService>();
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<ComplexityScorer>();
 builder.Services.AddSingleton<PromptTemplateStore>();
-builder.Services.AddSingleton<ValidationService>();
+builder.Services.AddTransient<ValidationService>();
+builder.Services.AddSingleton<ValidationStore>();
+builder.Services.AddTransient<GroundTruthParser>();
 
 builder.Services.AddScoped<AnalysisStateService>();
 builder.Services.AddScoped<ICobolChunker, CobolChunker>();
