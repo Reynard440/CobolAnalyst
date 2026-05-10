@@ -44,4 +44,38 @@ public sealed class AnalysisSession
 
     /// <summary>Display name of the prompt template used.</summary>
     public string? PromptTemplateName { get; set; }
+
+    /// <summary>
+    /// Permanent paths to Analyze-role source files copied into data storage.
+    /// Used by the Query page to load source code for edit proposals.
+    /// </summary>
+    public List<SessionSourceFile> SourceFiles { get; set; } = [];
+
+    /// <summary>Conversation turns from the Query tab for this session.</summary>
+    public List<ConversationTurn> ConversationHistory { get; set; } = [];
+}
+
+// ─── Supporting types ────────────────────────────────────────────────────────
+
+/// <summary>A permanent copy of an Analyze-role source file stored with the session.</summary>
+public sealed class SessionSourceFile
+{
+    public string FileName { get; set; } = string.Empty;
+    public string PermanentPath { get; set; } = string.Empty;
+}
+
+/// <summary>A single turn in the Query-tab conversation.</summary>
+public sealed class ConversationTurn
+{
+    /// <summary>Message role: "user", "assistant", or "system".</summary>
+    public string Role { get; set; } = string.Empty;
+
+    /// <summary>Full message text.</summary>
+    public string Content { get; set; } = string.Empty;
+
+    /// <summary>UTC timestamp when this turn was recorded.</summary>
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+
+    /// <summary>True when this turn resulted in an applied code edit.</summary>
+    public bool IsEditApplied { get; set; }
 }

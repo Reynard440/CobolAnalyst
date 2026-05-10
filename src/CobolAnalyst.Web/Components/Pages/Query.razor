@@ -1,0 +1,498 @@
+@page "/query"
+@rendermode InteractiveServer
+@implements IDisposable
+@using CobolAnalyst.Web.Core.Editing
+@using CobolAnalyst.Web.Core.Query
+@using CobolAnalyst.Web.Core.Sessions
+@using CobolAnalyst.Web.Core.State
+@inject SessionStore SessionStore
+@inject QueryService QueryService
+@inject CodeEditorService CodeEditorService
+@inject ILlmClient LlmClient
+@inject AnalysisStateService State
+
+<PageTitle>CobolAnalyst — Query</PageTitle>
+
+<div class="query-layout">
+
+    <!-- ── Left: session selector + conversation history ── -->
+    <aside class="query-sidebar">
+        <div class="qs-section">
+            <span class="qs-label">Session</span>
+            <select class="model-select" value="@_selectedSessionId"
+                    @onchange="OnSessionChanged">
+                <option value="">— select session —</option>
+                @foreach (var s in _sessions)
+                {
+                    <option value="@s.Id">@s.Name (@s.RuleCount rules)</option>
+                }
+            </select>
+        </div>
+
+        <div class="qs-section">
+            <span class="qs-label">Model</span>
+            @if (_availableModels.Count > 0)
+            {
+                <select class="model-select" value="@_selectedModel"
+                        @onchange="e => _selectedModel = e.Value?.ToString() ?? _selectedModel">
+                    @foreach (var m in _availableModels)
+                    {
+                        <option value="@m" selected="@(m == _selectedModel)">@m</option>
+                    }
+                </select>
+            }
+            else
+            {
+                <span class="qs-hint" style="color:var(--accent-red);">Ollama not reachable</span>
+            }
+        </div>
+
+        <div class="qs-section qs-history">
+            <span class="qs-label">Conversation</span>
+            @if (_conversation.Count == 0)
+            {
+                <span class="qs-hint">No messages yet</span>
+            }
+            else
+            {
+                <ul class="conv-list">
+                    @foreach (var turn in _conversation)
+                    {
+                        <li class="conv-item @(turn.Role == "user" ? "conv-user" : "conv-assistant")">
+                            <span class="conv-role">@(turn.Role == "user" ? "You" : "AI")</span>
+                            <span class="conv-preview">@Truncate(turn.Content, 60)</span>
+                            @if (turn.IsEditApplied)
+                            {
+                                <span class="conv-applied-badge">✓</span>
+                            }
+                        </li>
+                    }
+                </ul>
+                <button class="btn btn-sm" style="margin-top:8px;" @onclick="ClearConversation"
+                        disabled="@_streaming">
+                    Clear conversation
+                </button>
+            }
+        </div>
+    </aside>
+
+    <!-- ── Right: chat area ── -->
+    <section class="query-main">
+        @if (_activeSession is null)
+        {
+            <div class="empty-state">
+                <h3>Query Tab</h3>
+                <p>Select a session to start asking questions about its business rules and source code.</p>
+                <p style="font-size:13px;color:var(--text-secondary);">
+                    You can also ask the AI to make code changes — it will propose an edit you can preview and apply.
+                </p>
+            </div>
+        }
+        else
+        {
+            <!-- Message thread -->
+            <div class="chat-thread" @ref="_threadRef">
+                @foreach (var (turn, idx) in _conversation.Select((t, i) => (t, i)))
+                {
+                    <div class="chat-msg @(turn.Role == "user" ? "chat-msg-user" : "chat-msg-assistant")">
+                        <div class="chat-bubble">
+                            @if (turn.Role == "assistant" && _parsedEdits.TryGetValue(idx, out var editReq))
+                            {
+                                var plainText = _plainTexts.GetValueOrDefault(idx, turn.Content);
+                                @if (!string.IsNullOrWhiteSpace(plainText))
+                                {
+                                    <p style="white-space:pre-wrap;margin:0 0 12px;">@plainText</p>
+                                }
+                                <div class="edit-proposal">
+                                    <div class="edit-proposal-header">
+                                        <span class="ep-label">&#x270D; Edit Proposal</span>
+                                        <span class="ep-file">@editReq.File</span>
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(editReq.Intent))
+                                    {
+                                        <div class="ep-intent">@editReq.Intent</div>
+                                    }
+                                    @foreach (var (change, ci) in editReq.Changes.Select((c, i) => (c, i)))
+                                    {
+                                        @if (!_dismissedEdits.Contains((idx, ci)))
+                                        {
+                                            <div class="edit-change">
+                                                <div class="ec-desc">@change.Description</div>
+                                                @if (_previewDiffs.TryGetValue((idx, ci), out var diff))
+                                                {
+                                                    <div class="diff-view">
+                                                        @foreach (var dl in diff)
+                                                        {
+                                                            var diffClass = dl.Type switch {
+                                                                DiffLineType.Added   => "diff-added",
+                                                                DiffLineType.Removed => "diff-removed",
+                                                                _                    => "diff-context"
+                                                            };
+                                                            var marker = dl.Type switch {
+                                                                DiffLineType.Added   => "+",
+                                                                DiffLineType.Removed => "-",
+                                                                _                    => " "
+                                                            };
+                                                            <div class="diff-line @diffClass">
+                                                                <span class="diff-marker">@marker</span>
+                                                                <span class="diff-text">@dl.Text</span>
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                }
+                                                <div class="ec-actions">
+                                                    <button class="btn btn-sm"
+                                                            @onclick="() => TogglePreview(idx, ci, editReq, change)">
+                                                        @(_previewDiffs.ContainsKey((idx, ci)) ? "Hide Diff" : "Preview")
+                                                    </button>
+                                                    @if (!_appliedEdits.Contains((idx, ci)))
+                                                    {
+                                                        <button class="btn btn-sm btn-accept"
+                                                                @onclick="() => ApplyChange(idx, ci, editReq, change)"
+                                                                disabled="@_applyingEdit">
+                                                            Apply
+                                                        </button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="ep-applied">&#x2713; Applied</span>
+                                                    }
+                                                    <button class="btn btn-sm btn-danger"
+                                                            @onclick="() => DismissChange(idx, ci)">
+                                                        Dismiss
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        }
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <span style="white-space:pre-wrap;">@turn.Content</span>
+                            }
+                        </div>
+                        <span class="chat-ts">@turn.Timestamp.ToLocalTime().ToString("HH:mm")</span>
+                    </div>
+                }
+
+                @if (_streaming)
+                {
+                    <div class="chat-msg chat-msg-assistant">
+                        <div class="chat-bubble">
+                            <span style="white-space:pre-wrap;">@_streamBuffer</span><span class="chat-cursor">▌</span>
+                        </div>
+                    </div>
+                }
+            </div>
+
+            <!-- Input area -->
+            <div class="chat-input-row">
+                <textarea class="chat-input"
+                          placeholder="Ask about the rules, or request a code change…"
+                          @bind="_inputText"
+                          @bind:event="oninput"
+                          @onkeydown="HandleKey"
+                          rows="3"
+                          disabled="@_streaming"></textarea>
+                <div class="chat-send-col">
+                    @if (_streaming)
+                    {
+                        <button class="btn btn-danger btn-sm" @onclick="CancelStream">Stop</button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-primary"
+                                @onclick="SendMessage"
+                                disabled="@(string.IsNullOrWhiteSpace(_inputText))">
+                            Send
+                        </button>
+                    }
+                </div>
+            </div>
+
+            @if (_errorMessage is not null)
+            {
+                <div class="error-msg" style="margin:8px 16px;">@_errorMessage</div>
+            }
+        }
+    </section>
+</div>
+
+@code {
+    // ── Session / model selection ─────────────────────────────────────────────
+
+    private List<SessionSummary> _sessions = [];
+    private string _selectedSessionId = "";
+    private AnalysisSession? _activeSession;
+    private List<string> _availableModels = [];
+    private string _selectedModel = "";
+
+    // ── Conversation ──────────────────────────────────────────────────────────
+
+    private List<ConversationTurn> _conversation = [];
+    private string _inputText = "";
+    private bool _streaming;
+    private string _streamBuffer = "";
+    private CancellationTokenSource? _streamCts;
+    private bool _applyingEdit;
+    private string? _errorMessage;
+    private ElementReference _threadRef;
+
+    // Turn index → parsed EditRequest
+    private readonly Dictionary<int, EditRequest> _parsedEdits = [];
+    // Turn index → plain-text portion of assistant response
+    private readonly Dictionary<int, string> _plainTexts = [];
+    // (turnIdx, changeIdx) → diff lines (only when preview is open)
+    private readonly Dictionary<(int, int), IReadOnlyList<DiffLine>> _previewDiffs = [];
+    private readonly HashSet<(int, int)> _appliedEdits = [];
+    private readonly HashSet<(int, int)> _dismissedEdits = [];
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    protected override async Task OnInitializedAsync()
+    {
+        _sessions = await SessionStore.ListAsync();
+
+        _availableModels = [.. await LlmClient.GetAvailableModelsAsync()];
+        _selectedModel = LlmClient.SelectedModel;
+        if (_availableModels.Count > 0 && !_availableModels.Contains(_selectedModel))
+            _selectedModel = _availableModels[0];
+
+        // Pre-select the active circuit session if one is already loaded.
+        if (State.Session is not null)
+        {
+            _selectedSessionId = State.Session.Id;
+            await LoadSession(State.Session.Id);
+        }
+    }
+
+    // ── Event handlers ────────────────────────────────────────────────────────
+
+    private async Task OnSessionChanged(ChangeEventArgs e)
+    {
+        _selectedSessionId = e.Value?.ToString() ?? "";
+        if (string.IsNullOrEmpty(_selectedSessionId))
+        {
+            _activeSession = null;
+            ResetConversationState();
+            return;
+        }
+        await LoadSession(_selectedSessionId);
+    }
+
+    private async Task LoadSession(string id)
+    {
+        _activeSession = await SessionStore.LoadAsync(id);
+        ResetConversationState();
+
+        if (_activeSession is not null)
+        {
+            _conversation = [.. _activeSession.ConversationHistory];
+
+            // Re-parse any stored assistant turns for edit proposals
+            for (int i = 0; i < _conversation.Count; i++)
+            {
+                if (_conversation[i].Role == "assistant")
+                {
+                    var (plain, editReq) = QueryService.ParseResponse(_conversation[i].Content);
+                    if (editReq is not null)
+                    {
+                        _parsedEdits[i] = editReq;
+                        _plainTexts[i] = plain;
+                    }
+                }
+            }
+        }
+
+        StateHasChanged();
+    }
+
+    private void ResetConversationState()
+    {
+        _conversation = [];
+        _parsedEdits.Clear();
+        _plainTexts.Clear();
+        _previewDiffs.Clear();
+        _appliedEdits.Clear();
+        _dismissedEdits.Clear();
+        _errorMessage = null;
+        _streamBuffer = "";
+    }
+
+    private async Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_inputText) || _activeSession is null) return;
+
+        var userText = _inputText.Trim();
+        _inputText = "";
+        _errorMessage = null;
+
+        _conversation.Add(new ConversationTurn
+        {
+            Role = "user",
+            Content = userText,
+            Timestamp = DateTime.UtcNow
+        });
+
+        _streaming = true;
+        _streamBuffer = "";
+        _streamCts?.Dispose();
+        _streamCts = new CancellationTokenSource();
+
+        StateHasChanged();
+
+        try
+        {
+            LlmClient.SelectedModel = _selectedModel;
+            var systemPrompt = QueryService.BuildSystemPrompt(_activeSession);
+
+            await foreach (var token in LlmClient.StreamChatAsync(
+                systemPrompt, _conversation, _selectedModel, _streamCts.Token))
+            {
+                _streamBuffer += token;
+                await InvokeAsync(StateHasChanged);
+            }
+
+            var turnIdx = _conversation.Count;
+            var fullResponse = _streamBuffer;
+            var (plainText, editReq) = QueryService.ParseResponse(fullResponse);
+
+            _conversation.Add(new ConversationTurn
+            {
+                Role = "assistant",
+                Content = fullResponse,
+                Timestamp = DateTime.UtcNow
+            });
+
+            if (editReq is not null)
+            {
+                _parsedEdits[turnIdx] = editReq;
+                _plainTexts[turnIdx] = plainText;
+            }
+
+            await SessionStore.UpdateConversationAsync(_activeSession.Id, _conversation);
+        }
+        catch (OperationCanceledException)
+        {
+            if (_streamBuffer.Length > 0)
+            {
+                _conversation.Add(new ConversationTurn
+                {
+                    Role = "assistant",
+                    Content = _streamBuffer,
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            _streaming = false;
+            _streamBuffer = "";
+            StateHasChanged();
+        }
+    }
+
+    private void CancelStream() => _streamCts?.Cancel();
+
+    private async Task HandleKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+            await SendMessage();
+    }
+
+    private void TogglePreview(int turnIdx, int changeIdx, EditRequest req, EditChange change)
+    {
+        var key = (turnIdx, changeIdx);
+        if (_previewDiffs.ContainsKey(key))
+        {
+            _previewDiffs.Remove(key);
+            StateHasChanged();
+            return;
+        }
+
+        if (_activeSession is null) return;
+
+        var srcFile = _activeSession.SourceFiles.FirstOrDefault(f =>
+            string.Equals(f.FileName, req.File, StringComparison.OrdinalIgnoreCase));
+
+        if (srcFile is null || !File.Exists(srcFile.PermanentPath))
+        {
+            _errorMessage = $"Source file '{req.File}' not available for preview.";
+            StateHasChanged();
+            return;
+        }
+
+        var diff = CodeEditorService.GenerateDiff(change.OriginalText, change.ModifiedText);
+        _previewDiffs[key] = diff;
+        StateHasChanged();
+    }
+
+    private async Task ApplyChange(int turnIdx, int changeIdx, EditRequest req, EditChange change)
+    {
+        if (_activeSession is null) return;
+
+        _applyingEdit = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var singleReq = new EditRequest
+            {
+                Intent = change.Description,
+                File = req.File,
+                Changes = [change]
+            };
+
+            var result = await CodeEditorService.ApplyEditRequest(singleReq, _activeSession);
+            if (result.Success)
+            {
+                _appliedEdits.Add((turnIdx, changeIdx));
+                _conversation[turnIdx].IsEditApplied = true;
+                await SessionStore.UpdateConversationAsync(_activeSession.Id, _conversation);
+            }
+            else
+            {
+                _errorMessage = $"Apply failed: {result.ErrorMessage}";
+            }
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Apply error: {ex.Message}";
+        }
+        finally
+        {
+            _applyingEdit = false;
+            StateHasChanged();
+        }
+    }
+
+    private void DismissChange(int turnIdx, int changeIdx)
+    {
+        _dismissedEdits.Add((turnIdx, changeIdx));
+        _previewDiffs.Remove((turnIdx, changeIdx));
+        StateHasChanged();
+    }
+
+    private void ClearConversation()
+    {
+        ResetConversationState();
+        StateHasChanged();
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static string Truncate(string text, int maxLen) =>
+        text.Length <= maxLen ? text : text[..maxLen] + "…";
+
+    public void Dispose()
+    {
+        _streamCts?.Cancel();
+        _streamCts?.Dispose();
+    }
+}

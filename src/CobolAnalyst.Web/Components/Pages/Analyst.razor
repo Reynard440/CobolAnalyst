@@ -40,12 +40,27 @@
                 <ul class="file-list">
                     @foreach (var (path, err) in _stagedPaths)
                     {
-                        <li class="file-item">
+                        var role = _stagedRoles.GetValueOrDefault(path, FileRole.Analyze);
+                        <li class="file-item @(role == FileRole.Skip ? "file-skip" : "")">
                             <span class="file-name" title="@path">@Path.GetFileName(path)</span>
                             <span class="file-meta">@FormatSize(new FileInfo(path).Length)</span>
                             @if (err is not null)
                             {
                                 <span class="file-error">@err</span>
+                            }
+                            else
+                            {
+                                <div class="role-toggle" title="Set file role">
+                                    <button class="role-btn @(role == FileRole.Analyze ? "role-analyze" : "")"
+                                            @onclick="() => SetRole(path, FileRole.Analyze)"
+                                            disabled="@_analysing">A</button>
+                                    <button class="role-btn @(role == FileRole.Context ? "role-context" : "")"
+                                            @onclick="() => SetRole(path, FileRole.Context)"
+                                            disabled="@_analysing">C</button>
+                                    <button class="role-btn @(role == FileRole.Skip ? "role-skip" : "")"
+                                            @onclick="() => SetRole(path, FileRole.Skip)"
+                                            disabled="@_analysing">S</button>
+                                </div>
                             }
                         </li>
                     }
@@ -143,9 +158,21 @@
                     @foreach (var (path, _) in _stagedPaths)
                     {
                         var info = new FileInfo(path);
-                        <div class="file-tree-item">
+                        var panelRole = _stagedRoles.GetValueOrDefault(path, FileRole.Analyze);
+                        var roleBadge = panelRole switch {
+                            FileRole.Context => "role-badge-context",
+                            FileRole.Skip    => "role-badge-skip",
+                            _                => "role-badge-analyze"
+                        };
+                        var roleLabel = panelRole switch {
+                            FileRole.Context => "Context",
+                            FileRole.Skip    => "Skip",
+                            _                => "Analyze"
+                        };
+                        <div class="file-tree-item @(panelRole == FileRole.Skip ? "file-skip" : "")">
                             <span class="ft-name">@info.Name</span>
                             <span class="ft-meta">@FormatSize(info.Length)</span>
+                            <span class="role-badge @roleBadge">@roleLabel</span>
                         </div>
                     }
                 </div>
@@ -371,6 +398,7 @@
     // State — delegate to circuit-scoped AnalysisStateService so state survives navigation.
     private AnalysisSession? _session    { get => State.Session;     set => State.Session     = value; }
     private List<(string Path, string? Error)> _stagedPaths { get => State.StagedPaths; set => State.StagedPaths = value; }
+    private Dictionary<string, FileRole> _stagedRoles { get => State.StagedRoles; set => State.StagedRoles = value; }
     private bool _analysing              { get => State.IsAnalysing; set => State.IsAnalysing = value; }
     private string _sessionName          { get => State.SessionName; set => State.SessionName = value; }
     private string _selectedModel        { get => State.SelectedModel; set => State.SelectedModel = value; }
@@ -399,9 +427,11 @@
 
     private bool CanAnalyse =>
         _stagedPaths.Count > 0 &&
-        !_stagedPaths.Any(p => p.Error is not null) &&
         !_analysing &&
-        !string.IsNullOrEmpty(_selectedModel);
+        !string.IsNullOrEmpty(_selectedModel) &&
+        _stagedPaths.Any(p =>
+            p.Error is null &&
+            _stagedRoles.GetValueOrDefault(p.Path, FileRole.Analyze) == FileRole.Analyze);
 
     private IEnumerable<ExtractedRule> FilteredRules => _session is null
         ? []
@@ -452,13 +482,34 @@
                 await using var fs = new FileStream(tmpPath, FileMode.Create);
                 await file.OpenReadStream(maxAllowedSize: 500 * 1024).CopyToAsync(fs);
                 _stagedPaths.Add((tmpPath, null));
+                // Auto-detect role: small files or copybook-like names default to Context
+                _stagedRoles[tmpPath] = AutoDetectRole(tmpPath, new FileInfo(tmpPath).Length);
             }
             catch (Exception ex)
             {
                 _stagedPaths.Add((tmpPath, ex.Message));
+                _stagedRoles[tmpPath] = FileRole.Analyze;
             }
         }
         StateHasChanged();
+    }
+
+    private void SetRole(string path, FileRole role)
+    {
+        _stagedRoles[path] = role;
+        StateHasChanged();
+    }
+
+    private static FileRole AutoDetectRole(string path, long fileSize)
+    {
+        if (fileSize < 4000) return FileRole.Context;
+        var name = Path.GetFileName(path).ToLowerInvariant();
+        var ext  = Path.GetExtension(path).ToLowerInvariant();
+        if (ext == ".cpy") return FileRole.Context;
+        string[] contextKeywords = ["copy", "const", "include", "common", "global", "header", "def", "decl"];
+        if (contextKeywords.Any(kw => name.Contains(kw, StringComparison.Ordinal)))
+            return FileRole.Context;
+        return FileRole.Analyze;
     }
 
     private void HandleDrop(DragEventArgs e) => _dragging = false;
@@ -490,8 +541,36 @@
         bool succeeded = false;
         try
         {
-            var paths = _stagedPaths.Where(p => p.Error is null).Select(p => p.Path).ToList();
-            var (files, chunks) = await Chunker.ChunkFilesAsync(paths, _cts.Token);
+            // Separate paths by role — only Analyze-role files get chunked and processed.
+            var analyzePaths = _stagedPaths
+                .Where(p => p.Error is null &&
+                            _stagedRoles.GetValueOrDefault(p.Path, FileRole.Analyze) == FileRole.Analyze)
+                .Select(p => p.Path)
+                .ToList();
+
+            // Build a context block from all Context-role files (capped at 8 000 chars each).
+            var contextPaths = _stagedPaths
+                .Where(p => p.Error is null &&
+                            _stagedRoles.GetValueOrDefault(p.Path, FileRole.Analyze) == FileRole.Context)
+                .Select(p => p.Path)
+                .ToList();
+
+            string? contextBlock = null;
+            if (contextPaths.Count > 0)
+            {
+                var csb = new System.Text.StringBuilder();
+                csb.AppendLine("CONTEXT FILES (definitions and constants — do not extract rules from these):");
+                foreach (var cp in contextPaths)
+                {
+                    var text = await File.ReadAllTextAsync(cp, _cts!.Token);
+                    if (text.Length > 8000) text = text[..8000];
+                    csb.AppendLine($"=== {Path.GetFileName(cp)} ===");
+                    csb.AppendLine(text);
+                }
+                contextBlock = csb.ToString();
+            }
+
+            var (files, chunks) = await Chunker.ChunkFilesAsync(analyzePaths, _cts!.Token);
 
             var progress = new Progress<AnalysisProgressEvent>(evt =>
             {
@@ -508,7 +587,7 @@
             if (_forceReanalyse)
                 Cache.InvalidateAll();
 
-            var rules = await Orchestrator.AnalyseAsync(chunks, progress, _cts.Token);
+            var rules = await Orchestrator.AnalyseAsync(chunks, progress, _cts.Token, contextBlock);
 
             var activeTemplate = TemplateStore.GetActive();
             _session = new AnalysisSession
@@ -521,6 +600,24 @@
                 PromptTemplateId   = activeTemplate?.Id,
                 PromptTemplateName = activeTemplate?.Name
             };
+
+            // Copy Analyze-role source files to permanent storage for the Query tab.
+            var dataPath = Config["Storage:DataPath"] ?? "./data";
+            var srcFilesDir = Path.Combine(dataPath, "sessions", "source_files");
+            Directory.CreateDirectory(srcFilesDir);
+            var sourceFiles = new List<SessionSourceFile>();
+            foreach (var ap in analyzePaths)
+            {
+                var destName = $"{_session.Id}_{Path.GetFileName(ap)}";
+                var destPath = Path.Combine(srcFilesDir, destName);
+                File.Copy(ap, destPath, overwrite: true);
+                sourceFiles.Add(new SessionSourceFile
+                {
+                    FileName = Path.GetFileName(ap),
+                    PermanentPath = destPath
+                });
+            }
+            _session.SourceFiles = sourceFiles;
 
             await Sessions.SaveAsync(_session);
             succeeded = true;

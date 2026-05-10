@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using CobolAnalyst.Web.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -12,7 +13,8 @@ namespace CobolAnalyst.Web.Core.Llm;
 /// </summary>
 public sealed class OllamaClient : ILlmClient
 {
-    private const int NumPredict = 1500;
+    private const int NumPredict     = 1500;
+    private const int NumPredictChat = 4096;
     private const double Temperature = 0.1;
 
     private readonly HttpClient _http;
@@ -99,6 +101,87 @@ public sealed class OllamaClient : ILlmClient
             catch (JsonException ex)
             {
                 _logger.LogDebug(ex, "Skipping unparseable line from Ollama stream");
+            }
+
+            if (token is { Length: > 0 })
+                yield return token;
+
+            if (done) break;
+        }
+
+        response.Dispose();
+    }
+
+    /// <inheritdoc/>
+    public async IAsyncEnumerable<string> StreamChatAsync(
+        string systemPrompt,
+        IReadOnlyList<ConversationTurn> history,
+        string? model = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var effectiveModel = model ?? _selectedModel;
+
+        // Build messages: system + conversation history (exclude system turns)
+        var messages = new List<object>
+        {
+            new { role = "system", content = systemPrompt }
+        };
+        foreach (var turn in history)
+        {
+            if (turn.Role == "user" || turn.Role == "assistant")
+                messages.Add(new { role = turn.Role, content = turn.Content });
+        }
+
+        var body = new
+        {
+            model   = effectiveModel,
+            messages,
+            stream  = true,
+            options = new { temperature = Temperature, num_predict = NumPredictChat }
+        };
+
+        var json = JsonSerializer.Serialize(body);
+        _logger.LogDebug("Ollama chat request: model={Model}, turns={Turns}", effectiveModel, messages.Count);
+
+        HttpResponseMessage response;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/api/chat");
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Ollama chat connection failed");
+            throw new InvalidOperationException(
+                $"Could not connect to Ollama at {_baseUrl}. Make sure Ollama is running.", ex);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream);
+
+        string? line;
+        while ((line = await ReadLineGuarded(reader, cancellationToken)) != null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            string? token = null;
+            bool done = false;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("done", out var doneProp))
+                    done = doneProp.GetBoolean();
+                if (!done &&
+                    root.TryGetProperty("message", out var msg) &&
+                    msg.TryGetProperty("content", out var content))
+                    token = content.GetString();
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug(ex, "Skipping unparseable chat line");
             }
 
             if (token is { Length: > 0 })

@@ -2,10 +2,12 @@ using CobolAnalyst.Web.Components;
 using CobolAnalyst.Web.Core.Analysis;
 using CobolAnalyst.Web.Core.Cache;
 using CobolAnalyst.Web.Core.Chunking;
+using CobolAnalyst.Web.Core.Editing;
 using CobolAnalyst.Web.Core.Generation;
 using CobolAnalyst.Web.Core.KnowledgeBase;
 using CobolAnalyst.Web.Core.Llm;
 using CobolAnalyst.Web.Core.Prompts;
+using CobolAnalyst.Web.Core.Query;
 using CobolAnalyst.Web.Core.Sessions;
 using CobolAnalyst.Web.Core.State;
 using CobolAnalyst.Web.Core.Validation;
@@ -50,6 +52,8 @@ builder.Services.AddScoped<ICobolChunker, CobolChunker>();
 builder.Services.AddScoped<IAnalysisOrchestrator, AnalysisOrchestrator>();
 
 builder.Services.AddTransient<CSharpScaffoldGenerator>();
+builder.Services.AddTransient<QueryService>();
+builder.Services.AddTransient<CodeEditorService>();
 
 var app = builder.Build();
 

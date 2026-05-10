@@ -98,6 +98,55 @@ public sealed class SessionStore
         await SaveAsync(session);
     }
 
+    /// <summary>
+    /// Deletes a session's JSON file and any associated source files.
+    /// Returns <c>true</c> if the session was found and deleted; <c>false</c> otherwise.
+    /// Never throws.
+    /// </summary>
+    public Task<bool> DeleteSessionAsync(string id)
+    {
+        try
+        {
+            var path = SessionPath(id);
+            if (!File.Exists(path)) return Task.FromResult(false);
+
+            File.Delete(path);
+
+            var sourceFilesDir = Path.Combine(_sessionsDir, "source_files");
+            if (Directory.Exists(sourceFilesDir))
+            {
+                foreach (var f in Directory.EnumerateFiles(sourceFilesDir, $"{id}_*"))
+                {
+                    try { File.Delete(f); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Could not delete source file {F}", f); }
+                }
+            }
+
+            _logger.LogInformation("Session {Id} deleted", id);
+            return Task.FromResult(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to delete session {Id}", id);
+            return Task.FromResult(false);
+        }
+    }
+
+    /// <summary>
+    /// Reloads the session from disk, replaces its conversation history, and writes it back.
+    /// </summary>
+    public async Task UpdateConversationAsync(string id, List<ConversationTurn> history)
+    {
+        var session = await LoadAsync(id);
+        if (session is null)
+        {
+            _logger.LogWarning("UpdateConversation: session {Id} not found on disk", id);
+            return;
+        }
+        session.ConversationHistory = history;
+        await SaveAsync(session);
+    }
+
     private string SessionPath(string id) => Path.Combine(_sessionsDir, $"{id}.json");
 
     /// <summary>Counts rule decisions from a raw JSON session element.</summary>

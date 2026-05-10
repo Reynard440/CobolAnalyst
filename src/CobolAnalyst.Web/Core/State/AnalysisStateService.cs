@@ -2,6 +2,7 @@ using CobolAnalyst.Web.Models;
 
 namespace CobolAnalyst.Web.Core.State;
 
+
 /// <summary>Analysis lifecycle states.</summary>
 public enum AnalysisStatus { Idle, Running, Complete, Failed }
 
@@ -18,6 +19,12 @@ public sealed class AnalysisStateService
 
     /// <summary>Files staged for analysis — temp-file paths plus any read error.</summary>
     public List<(string Path, string? Error)> StagedPaths { get; set; } = [];
+
+    /// <summary>
+    /// Role assigned to each staged file by the analyst.
+    /// Key: absolute temp-file path.  Populated in <c>HandleFileSelected</c>.
+    /// </summary>
+    public Dictionary<string, FileRole> StagedRoles { get; set; } = new();
 
     /// <summary>Whether an analysis is currently in flight.</summary>
     public bool IsAnalysing { get; set; }
@@ -53,13 +60,14 @@ public sealed class AnalysisStateService
     /// <summary>Clears all transient state and notifies subscribers.</summary>
     public void Clear()
     {
-        Session     = null;
-        StagedPaths = [];
-        IsAnalysing = false;
-        Status      = AnalysisStatus.Idle;
-        Elapsed     = TimeSpan.Zero;
+        Session      = null;
+        StagedPaths  = [];
+        StagedRoles  = new();
+        IsAnalysing  = false;
+        Status       = AnalysisStatus.Idle;
+        Elapsed      = TimeSpan.Zero;
         TimerRunning = false;
-        SessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
+        SessionName  = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
         NotifyChanged();
     }
 }

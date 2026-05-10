@@ -30,6 +30,9 @@
                     <div class="sc-header">
                         <span class="sc-name" title="@s.Name">@s.Name</span>
                         <span class="sc-rules-badge">@s.RuleCount rules</span>
+                        <button class="btn-icon-delete" title="Delete session"
+                                @onclick="() => PromptDelete(s.Id)"
+                                disabled="@(_loadingId is not null)">&#x1F5D1;</button>
                     </div>
 
                     <div class="sc-meta">
@@ -47,14 +50,30 @@
                         </div>
                     }
 
+                    @if (_confirmDeleteId == s.Id)
+                    {
+                        <div class="sc-delete-confirm">
+                            <span>Delete this session? This cannot be undone.</span>
+                            <div class="sc-delete-actions">
+                                <button class="btn btn-danger btn-sm" @onclick="() => ConfirmDelete(s.Id)">Delete</button>
+                                <button class="btn btn-sm" @onclick="CancelDelete">Cancel</button>
+                            </div>
+                        </div>
+                    }
+
                     <button class="btn btn-primary btn-sm sc-load-btn"
                             @onclick="() => LoadSession(s.Id)"
-                            disabled="@(_loadingId is not null)">
+                            disabled="@(_loadingId is not null || _confirmDeleteId is not null)">
                         @(_loadingId == s.Id ? "Loading…" : "Load Session")
                     </button>
                 </div>
             }
         </div>
+    }
+
+    @if (_toastMessage is not null)
+    {
+        <div class="toast-msg">@_toastMessage</div>
     }
 
     @if (_errorMessage is not null)
@@ -68,6 +87,9 @@
     private bool _loading = true;
     private string? _loadingId;
     private string? _errorMessage;
+    private string? _confirmDeleteId;
+    private string? _toastMessage;
+    private System.Threading.Timer? _toastTimer;
 
     protected override async Task OnInitializedAsync()
     {
@@ -116,5 +138,55 @@
         {
             _loadingId = null;
         }
+    }
+
+    private void PromptDelete(string id)
+    {
+        _confirmDeleteId = id;
+        _errorMessage = null;
+        StateHasChanged();
+    }
+
+    private void CancelDelete()
+    {
+        _confirmDeleteId = null;
+        StateHasChanged();
+    }
+
+    private async Task ConfirmDelete(string id)
+    {
+        _confirmDeleteId = null;
+        _errorMessage = null;
+
+        var ok = await SessionStore.DeleteSessionAsync(id);
+        if (ok)
+        {
+            _sessions.RemoveAll(s => s.Id == id);
+
+            // If the active circuit session was the deleted one, clear state.
+            if (State.Session?.Id == id)
+                State.Clear();
+
+            ShowToast("Session deleted.");
+        }
+        else
+        {
+            _errorMessage = "Could not delete session — it may have already been removed.";
+        }
+
+        StateHasChanged();
+    }
+
+    private void ShowToast(string message)
+    {
+        _toastMessage = message;
+        _toastTimer?.Dispose();
+        _toastTimer = new System.Threading.Timer(_ =>
+        {
+            _toastMessage = null;
+            _toastTimer?.Dispose();
+            _toastTimer = null;
+            InvokeAsync(StateHasChanged);
+        }, null, 2000, System.Threading.Timeout.Infinite);
     }
 }

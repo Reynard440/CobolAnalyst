@@ -20,4 +20,10 @@ public sealed class CobolFile
 
     /// <summary>SHA-256 hash of the file content (hex).</summary>
     public string ContentHash { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Role assigned to this file: Analyze (extract rules), Context (inject as background),
+    /// or Skip (ignore). Set by the analyst before analysis starts.
+    /// </summary>
+    public FileRole Role { get; set; } = FileRole.Analyze;
 }

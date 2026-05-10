@@ -95,7 +95,11 @@ public static class PromptBuilder
     /// <param name="chunk">The chunk to analyse.</param>
     /// <param name="knowledgeHints">Up to three previously confirmed rules to inject as context.</param>
     /// <param name="template">Optional active prompt template; overrides persona/suppression/instructions when set.</param>
-    public static string BuildExtractionPrompt(CobolChunk chunk, IEnumerable<KnowledgeEntry> knowledgeHints, PromptTemplate? template = null)
+    /// <param name="contextBlock">
+    /// Optional pre-built block of Context-role file content to inject after knowledge hints
+    /// so the LLM has definitions and constants available during extraction.
+    /// </param>
+    public static string BuildExtractionPrompt(CobolChunk chunk, IEnumerable<KnowledgeEntry> knowledgeHints, PromptTemplate? template = null, string? contextBlock = null)
     {
         bool isVb = IsVbFile(chunk.FileName);
         string language     = isVb ? "Visual Basic" : "COBOL";
@@ -125,6 +129,10 @@ public static class PromptBuilder
             ? "Previously confirmed rules for context (do not repeat these exactly):\n" + string.Join("\n", hintLines) + "\n\n"
             : string.Empty;
 
+        var contextSection = contextBlock is { Length: > 0 }
+            ? contextBlock + "\n"
+            : string.Empty;
+
         var parts = new List<string>
         {
             persona,
@@ -132,6 +140,7 @@ public static class PromptBuilder
             $"Complexity tier: {chunk.Complexity}. {adaptiveInstruction}",
             string.Empty,
             hintsSection,
+            contextSection,
             "## Worked Example",
             string.Empty,
             $"Input {language}:",

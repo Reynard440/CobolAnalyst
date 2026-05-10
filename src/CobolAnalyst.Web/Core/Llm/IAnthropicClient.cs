@@ -1,3 +1,5 @@
+using CobolAnalyst.Web.Models;
+
 namespace CobolAnalyst.Web.Core.Llm;
 
 /// <summary>Streams completions from a local Ollama LLM instance.</summary>
@@ -12,6 +14,16 @@ public interface ILlmClient
     /// </summary>
     IAsyncEnumerable<string> StreamCompletionAsync(
         string prompt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Multi-turn chat stream with a system prompt and conversation history.
+    /// Sends the full message array to /api/chat and yields response tokens.
+    /// </summary>
+    IAsyncEnumerable<string> StreamChatAsync(
+        string systemPrompt,
+        IReadOnlyList<ConversationTurn> history,
+        string? model = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>Returns the list of model tags available in the local Ollama instance.</summary>

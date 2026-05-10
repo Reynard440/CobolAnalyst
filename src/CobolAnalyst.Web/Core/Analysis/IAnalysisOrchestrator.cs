@@ -31,8 +31,13 @@ public interface IAnalysisOrchestrator
     /// Analyses <paramref name="chunks"/> and returns the deduplicated list of extracted rules.
     /// Reports progress via <paramref name="progress"/>.
     /// </summary>
+    /// <param name="contextBlock">
+    /// Optional pre-built block of Context-role file content injected into each chunk's prompt
+    /// so the LLM has definitions and constants available during extraction.
+    /// </param>
     Task<List<ExtractedRule>> AnalyseAsync(
         List<CobolChunk> chunks,
         IProgress<AnalysisProgressEvent>? progress,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? contextBlock = null);
 }

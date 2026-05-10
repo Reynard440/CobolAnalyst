@@ -46,7 +46,8 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
     public async Task<List<ExtractedRule>> AnalyseAsync(
         List<CobolChunk> chunks,
         IProgress<AnalysisProgressEvent>? progress,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? contextBlock = null)
     {
         var sw = Stopwatch.StartNew();
         var allRules = new ConcurrentBag<ExtractedRule>();
@@ -54,7 +55,7 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         var activeTemplate = _templates.GetActive();
 
         var tasks = chunks.Select(chunk => ProcessChunkAsync(
-            chunk, sem, allRules, progress, sw, activeTemplate, cancellationToken)).ToList();
+            chunk, sem, allRules, progress, sw, activeTemplate, contextBlock, cancellationToken)).ToList();
 
         await Task.WhenAll(tasks);
 
@@ -76,6 +77,7 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         IProgress<AnalysisProgressEvent>? progress,
         Stopwatch sw,
         Models.PromptTemplate? activeTemplate,
+        string? contextBlock,
         CancellationToken ct)
     {
         progress?.Report(new AnalysisProgressEvent
@@ -96,7 +98,7 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
             });
 
             var hints = _kb.GetTopHints(chunk.SourceText, 3);
-            var prompt = PromptBuilder.BuildExtractionPrompt(chunk, hints, activeTemplate);
+            var prompt = PromptBuilder.BuildExtractionPrompt(chunk, hints, activeTemplate, contextBlock);
 
             var model = _llm.SelectedModel;
             var cached = _cache.TryGet(chunk.SourceText, prompt, model);
