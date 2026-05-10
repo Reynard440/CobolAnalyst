@@ -69,12 +69,18 @@
                 }
             </div>
 
-            @if (_selected.ParentName is not null)
-            {
-                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;">
-                    Derived from <strong>@_selected.ParentName</strong>
-                </div>
-            }
+            <!-- Metadata row -->
+            <div class="wf-meta-row">
+                <span class="wf-meta-label">ID</span>
+                <code class="wf-meta-id">@_selected.Id</code>
+                <span class="wf-meta-label" style="margin-left:18px;">Created</span>
+                <span class="wf-meta-value">@_selected.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                @if (_selected.ParentName is not null)
+                {
+                    <span class="wf-meta-label" style="margin-left:18px;">Parent</span>
+                    <span class="wf-meta-value">@_selected.ParentName</span>
+                }
+            </div>
 
             <div class="workshop-form">
 
@@ -96,14 +102,14 @@
                           placeholder="e.g. Do NOT extract: FILLER fields, debug DISPLAY statements, comments, or any rule with Low confidence."></textarea>
 
                 <label class="wf-label">
-                    Additional Instructions
-                    <small class="wf-hint">Appended before the Output Instructions section. Use to add extra constraints or examples.</small>
+                    Prompt Text
+                    <small class="wf-hint">Core extraction instructions appended before the Output schema. Edit to shape what the LLM extracts.</small>
                 </label>
-                <textarea class="wf-textarea" @bind="_editAdditional" rows="5"
-                          placeholder="e.g. Always extract rules for COMPUTE statements even when they appear trivial."></textarea>
+                <textarea class="wf-textarea wf-textarea-mono" @bind="_editAdditional" rows="20"
+                          placeholder="Enter extraction instructions…"></textarea>
 
                 <div class="wf-actions">
-                    <button class="btn btn-primary" @onclick="SaveEdits">Save Changes</button>
+                    <button class="btn btn-primary" @onclick="SaveEdits" disabled="@(!IsDirty)">Save Changes</button>
                     @if (!_selected.IsActive)
                     {
                         <button class="btn" @onclick="ActivateSelected">Set as Active</button>
@@ -211,9 +217,10 @@
 
     private void Select(PromptTemplate t)
     {
-        _selected = t;
+        _selected    = t;
         _saveMessage = null;
         PopulateEdits();
+        StateHasChanged();
     }
 
     private void PopulateEdits()
@@ -224,6 +231,14 @@
         _editAdditional = _selected?.AdditionalInstructions ?? "";
     }
 
+    /// <summary>True when any edit field differs from the currently loaded template values.</summary>
+    private bool IsDirty =>
+        _selected is not null &&
+        (_editDesc       != (_selected.Description            ?? "") ||
+         _editPersona    != (_selected.PersonaOverride        ?? "") ||
+         _editSuppress   != (_selected.SuppressionOverride    ?? "") ||
+         _editAdditional != (_selected.AdditionalInstructions ?? ""));
+
     private void SaveEdits()
     {
         if (_selected is null) return;
@@ -232,7 +247,7 @@
         _selected.SuppressionOverride    = string.IsNullOrWhiteSpace(_editSuppress)   ? null : _editSuppress.Trim();
         _selected.AdditionalInstructions = string.IsNullOrWhiteSpace(_editAdditional) ? null : _editAdditional.Trim();
         TemplateStore.Save(_selected);
-        _saveMessage = "Saved.";
+        _saveMessage = "Saved ✓";
         Reload();
     }
 

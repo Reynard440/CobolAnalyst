@@ -2,6 +2,9 @@ using CobolAnalyst.Web.Models;
 
 namespace CobolAnalyst.Web.Core.State;
 
+/// <summary>Analysis lifecycle states.</summary>
+public enum AnalysisStatus { Idle, Running, Complete, Failed }
+
 /// <summary>
 /// Circuit-scoped (Scoped DI) service that preserves analysis state across Blazor
 /// page navigations.  One instance per SignalR circuit (browser tab).
@@ -18,6 +21,15 @@ public sealed class AnalysisStateService
 
     /// <summary>Whether an analysis is currently in flight.</summary>
     public bool IsAnalysing { get; set; }
+
+    /// <summary>Current lifecycle status of the analysis.</summary>
+    public AnalysisStatus Status { get; set; } = AnalysisStatus.Idle;
+
+    /// <summary>Elapsed time of the last (or current) analysis run.</summary>
+    public TimeSpan Elapsed { get; set; }
+
+    /// <summary>Whether the elapsed timer is currently ticking.</summary>
+    public bool TimerRunning { get; set; }
 
     /// <summary>Currently selected Ollama model name.</summary>
     public string SelectedModel { get; set; } = "";
@@ -41,9 +53,12 @@ public sealed class AnalysisStateService
     /// <summary>Clears all transient state and notifies subscribers.</summary>
     public void Clear()
     {
-        Session    = null;
+        Session     = null;
         StagedPaths = [];
         IsAnalysing = false;
+        Status      = AnalysisStatus.Idle;
+        Elapsed     = TimeSpan.Zero;
+        TimerRunning = false;
         SessionName = $"Session {DateTime.Now:yyyy-MM-dd HH:mm}";
         NotifyChanged();
     }

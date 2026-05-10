@@ -160,8 +160,25 @@
                     }
                     @if (!string.IsNullOrEmpty(_elapsedDisplay))
                     {
-                        <span class="elapsed-timer @(_analysing ? "elapsed-running" : "elapsed-done")">
-                            &#x23F1; @_elapsedDisplay
+                        var timerClass = State.Status switch {
+                            AnalysisStatus.Running  => "elapsed-running",
+                            AnalysisStatus.Complete => "elapsed-done",
+                            AnalysisStatus.Failed   => "elapsed-failed",
+                            _                       => "elapsed-done"
+                        };
+                        var timerDot = State.Status switch {
+                            AnalysisStatus.Running  => "timer-dot-running",
+                            AnalysisStatus.Complete => "timer-dot-done",
+                            AnalysisStatus.Failed   => "timer-dot-failed",
+                            _                       => "timer-dot-done"
+                        };
+                        var timerSuffix = State.Status switch {
+                            AnalysisStatus.Complete => " ✓",
+                            AnalysisStatus.Failed   => " ✗",
+                            _                       => ""
+                        };
+                        <span class="elapsed-timer @timerClass">
+                            <span class="timer-dot @timerDot"></span>@_elapsedDisplay@timerSuffix
                         </span>
                     }
                 </div>
@@ -341,9 +358,10 @@
     private List<string> _availableModels = [];
     private bool _loadingModels = true;
 
-    // Elapsed timer
+    // Elapsed timer — display is frozen at final value when analysis stops
     private PeriodicTimer? _ticker;
     private string _elapsedDisplay = "";
+    private CancellationTokenSource? _timerCts;
 
     // State — delegate to circuit-scoped AnalysisStateService so state survives navigation.
     private AnalysisSession? _session    { get => State.Session;     set => State.Session     = value; }
@@ -447,14 +465,23 @@
         _session = null;
         _activeModel = _selectedModel;
         _elapsedDisplay = "0:00";
+        State.Status = AnalysisStatus.Running;
+        State.Elapsed = TimeSpan.Zero;
+        State.TimerRunning = true;
 
-        // Cancel and replace any leftover CTS from a previous run.
+        // Cancel any leftover CTS from a previous run.
         _cts?.Cancel();
         _cts?.Dispose();
+        _timerCts?.Cancel();
+        _timerCts?.Dispose();
+
         _cts = new CancellationTokenSource();
+        _timerCts = new CancellationTokenSource();
 
-        _ = RunElapsedTimerAsync(DateTime.UtcNow, _cts.Token);
+        var analysisStart = DateTime.UtcNow;
+        _ = RunElapsedTimerAsync(analysisStart, _timerCts.Token);
 
+        bool succeeded = false;
         try
         {
             var paths = _stagedPaths.Where(p => p.Error is null).Select(p => p.Path).ToList();
@@ -485,6 +512,7 @@
             };
 
             await Sessions.SaveAsync(_session);
+            succeeded = true;
         }
         catch (OperationCanceledException)
         {
@@ -496,9 +524,17 @@
         }
         finally
         {
+            // Freeze the timer display at final elapsed time.
+            State.Elapsed = DateTime.UtcNow - analysisStart;
+            var finalMs = (long)State.Elapsed.TotalMilliseconds;
+            var finalMin = (int)State.Elapsed.TotalMinutes;
+            _elapsedDisplay = $"{finalMin}:{State.Elapsed.Seconds:D2}";
+
+            // Stop the timer task.
+            _timerCts?.Cancel();
+            State.TimerRunning = false;
+            State.Status = succeeded ? AnalysisStatus.Complete : AnalysisStatus.Failed;
             _analysing = false;
-            // Cancel the CTS to stop the elapsed timer task.
-            _cts?.Cancel();
             State.NotifyChanged();
             StateHasChanged();
         }
@@ -591,12 +627,15 @@
     private void ClearSession()
     {
         _cts?.Cancel();
+        _timerCts?.Cancel();
         _progressRows = [];
         _queryText = "";
         _queryResult = "";
         _showQuery = false;
         _globalError = null;
-        State.Clear(); // clears session, stagedPaths, analysing, sessionName and notifies
+        _elapsedDisplay = "";
+        _activeModel = "";
+        State.Clear(); // clears session, stagedPaths, analysing, status, sessionName, notifies
         StateHasChanged();
     }
 
@@ -615,6 +654,7 @@
             while (await _ticker.WaitForNextTickAsync(ct))
             {
                 var elapsed = DateTime.UtcNow - start;
+                State.Elapsed = elapsed;
                 _elapsedDisplay = $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:D2}";
                 await InvokeAsync(StateHasChanged);
             }
@@ -633,6 +673,8 @@
         _ticker?.Dispose();
         _cts?.Cancel();
         _cts?.Dispose();
+        _timerCts?.Cancel();
+        _timerCts?.Dispose();
         _queryCts?.Cancel();
         _queryCts?.Dispose();
     }

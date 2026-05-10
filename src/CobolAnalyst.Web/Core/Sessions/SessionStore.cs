@@ -41,15 +41,20 @@ public sealed class SessionStore
                 var json = await File.ReadAllTextAsync(file);
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
+                var (decided, accepted, rejected, flagged, pending, total) = ComputeCounts(root);
                 summaries.Add(new SessionSummary
                 {
                     Id = root.TryGetStringProp("Id") ?? Path.GetFileNameWithoutExtension(file),
                     Name = root.TryGetStringProp("Name") ?? "(unnamed)",
                     CreatedAt = root.TryGetProperty("CreatedAt", out var ts) && ts.TryGetDateTime(out var dt)
                         ? dt : File.GetCreationTimeUtc(file),
-                    FileCount = root.TryGetProperty("Files", out var files) ? files.GetArrayLength() : 0,
-                    RuleCount = root.TryGetProperty("Rules", out var rules) ? rules.GetArrayLength() : 0,
-                    DecisionProgress = ComputeProgress(root)
+                    FileCount = root.TryGetProperty("Files", out var filesEl) ? filesEl.GetArrayLength() : 0,
+                    RuleCount = total,
+                    DecisionProgress = $"{decided}/{total}",
+                    AcceptedCount    = accepted,
+                    RejectedCount    = rejected,
+                    FlaggedCount     = flagged,
+                    PendingCount     = pending
                 });
             }
             catch (Exception ex)
@@ -77,19 +82,46 @@ public sealed class SessionStore
         }
     }
 
+    /// <summary>
+    /// Reloads the session from disk, replaces its rules with <paramref name="rules"/>,
+    /// and writes it back. Used to persist Accept / Reject / Flag decisions.
+    /// </summary>
+    public async Task UpdateDecisionsAsync(string id, List<ExtractedRule> rules)
+    {
+        var session = await LoadAsync(id);
+        if (session is null)
+        {
+            _logger.LogWarning("UpdateDecisions: session {Id} not found on disk", id);
+            return;
+        }
+        session.Rules = rules;
+        await SaveAsync(session);
+    }
+
     private string SessionPath(string id) => Path.Combine(_sessionsDir, $"{id}.json");
 
-    private static string ComputeProgress(JsonElement root)
+    /// <summary>Counts rule decisions from a raw JSON session element.</summary>
+    private static (int decided, int accepted, int rejected, int flagged, int pending, int total)
+        ComputeCounts(JsonElement root)
     {
-        if (!root.TryGetProperty("Rules", out var rulesEl)) return "0/0";
-        int total = rulesEl.GetArrayLength();
-        int decided = 0;
+        if (!root.TryGetProperty("Rules", out var rulesEl))
+            return (0, 0, 0, 0, 0, 0);
+
+        int total = 0, accepted = 0, rejected = 0, flagged = 0;
         foreach (var r in rulesEl.EnumerateArray())
         {
-            if (r.TryGetProperty("Decision", out var d) && d.GetString() != "Pending")
-                decided++;
+            total++;
+            var decision = r.TryGetProperty("Decision", out var d) ? d.GetString() : "Pending";
+            switch (decision)
+            {
+                case "Accepted": accepted++; break;
+                case "Rejected": rejected++; break;
+                case "Flagged":  flagged++;  break;
+            }
         }
-        return $"{decided}/{total}";
+        int pending = total - accepted - rejected - flagged;
+        int decided = accepted + rejected + flagged;
+        return (decided, accepted, rejected, flagged, pending, total);
     }
 }
 
@@ -113,6 +145,18 @@ public sealed class SessionSummary
 
     /// <summary>Decision progress string e.g. "12/20".</summary>
     public string DecisionProgress { get; init; } = string.Empty;
+
+    /// <summary>Number of rules accepted by the analyst.</summary>
+    public int AcceptedCount { get; init; }
+
+    /// <summary>Number of rules rejected by the analyst.</summary>
+    public int RejectedCount { get; init; }
+
+    /// <summary>Number of rules flagged for further review.</summary>
+    public int FlaggedCount { get; init; }
+
+    /// <summary>Number of rules with no decision yet.</summary>
+    public int PendingCount { get; init; }
 }
 
 file static class JsonElementSessionExtensions
