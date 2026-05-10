@@ -12,6 +12,19 @@ using CobolAnalyst.Web.Core.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ── Resolve DataPath to an absolute path anchored at the content root ─────────
+// "Storage:DataPath" is "./data" by default.  Without this fix the path resolves
+// relative to the process working directory, which differs between `dotnet run`,
+// Visual Studio, and Rider — causing each service to write to a different folder.
+// Normalising to ContentRootPath here means every Singleton reads the same value.
+{
+    var raw     = builder.Configuration["Storage:DataPath"] ?? "./data";
+    var absolute = Path.IsPathRooted(raw)
+        ? raw
+        : Path.GetFullPath(raw, builder.Environment.ContentRootPath);
+    builder.Configuration["Storage:DataPath"] = absolute;
+}
+
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
