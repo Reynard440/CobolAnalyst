@@ -5,6 +5,7 @@
 @using CobolAnalyst.Web.Core.Prompts
 @using CobolAnalyst.Web.Core.State
 @inject AnalysisStateService State
+@inject AnalysisCache Cache
 @inject ICobolChunker Chunker
 @inject IAnalysisOrchestrator Orchestrator
 @inject ILlmClient LlmClient
@@ -87,6 +88,10 @@
                     disabled="@(!CanAnalyse)">
                 @(_analysing ? "Analysing…" : "Analyse")
             </button>
+            <label class="force-toggle" title="Clear the analysis cache and re-run Ollama for all chunks">
+                <input type="checkbox" @bind="_forceReanalyse" disabled="@_analysing" />
+                Force re-analyse
+            </label>
             <button class="btn" @onclick="ToggleQueryPanel"
                     disabled="@(_session is null || _analysing)">
                 Query Rules
@@ -371,6 +376,7 @@
     private string _selectedModel        { get => State.SelectedModel; set => State.SelectedModel = value; }
 
     private bool _dragging;
+    private bool _forceReanalyse;
     private string? _globalError;
     private string _activeModel = "";
     private CancellationTokenSource? _cts;
@@ -497,6 +503,11 @@
                 InvokeAsync(StateHasChanged);
             });
 
+            // When "Force re-analyse" is ticked, purge the cache before dispatching so
+            // every chunk reaches Ollama regardless of prior results.
+            if (_forceReanalyse)
+                Cache.InvalidateAll();
+
             var rules = await Orchestrator.AnalyseAsync(chunks, progress, _cts.Token);
 
             var activeTemplate = TemplateStore.GetActive();
@@ -535,6 +546,7 @@
             State.TimerRunning = false;
             State.Status = succeeded ? AnalysisStatus.Complete : AnalysisStatus.Failed;
             _analysing = false;
+            _forceReanalyse = false;   // reset so the next run uses the cache by default
             State.NotifyChanged();
             StateHasChanged();
         }

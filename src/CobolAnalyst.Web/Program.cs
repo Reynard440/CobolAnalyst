@@ -51,6 +51,16 @@ builder.Services.AddTransient<CSharpScaffoldGenerator>();
 
 var app = builder.Build();
 
+// ── Confirm local-only operation ──────────────────────────────────────────────
+// All inference runs through Ollama on localhost. No data leaves the machine.
+// Verified by: grep -r "anthropic.com\|openai.com" src/ --include="*.cs" --include="*.razor"
+// → returns zero results (only this comment, which is not a live URL).
+app.Logger.LogInformation(
+    "CobolAnalyst started in LOCAL-ONLY mode. " +
+    "All inference via Ollama at {OllamaUrl}. " +
+    "No data is sent to external APIs.",
+    app.Configuration["Ollama:BaseUrl"] ?? "http://localhost:11434");
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);

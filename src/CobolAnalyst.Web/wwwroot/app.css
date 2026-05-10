@@ -429,6 +429,28 @@ body {
 .file-item .file-meta { color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .file-item .file-error { color: var(--red); font-size: 11px; }
 
+/* ── Force re-analyse toggle ── */
+.force-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-2);
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 2px;
+    transition: color var(--t-fast);
+}
+.force-toggle:hover { color: var(--text-1); }
+.force-toggle input[type=checkbox] {
+    accent-color: var(--brand);
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.force-toggle input[type=checkbox]:disabled { opacity: 0.4; cursor: not-allowed; }
+
 /* ── KB stats ── */
 .kb-stats { font-size: 12px; color: var(--text-2); line-height: 1.5; }
 .kb-stats strong { color: var(--text-1); }
