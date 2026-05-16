@@ -148,6 +148,12 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
                 ElapsedMs = sw.ElapsedMilliseconds
             });
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // User navigated away or explicitly cancelled — expected, not an error.
+            _logger.LogDebug("Analysis cancelled by user for chunk {Label}", chunk.Label);
+            // Do NOT report ChunkStatus.Failed; leave the chunk in its last reported state.
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to analyse chunk {Label}", chunk.Label);
@@ -172,6 +178,10 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         {
             await foreach (var token in _llm.StreamCompletionAsync(prompt, ct))
                 sb.Append(token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // Let ProcessChunkAsync's specific catch handle user cancellation
         }
         catch (IOException ex)
         {
