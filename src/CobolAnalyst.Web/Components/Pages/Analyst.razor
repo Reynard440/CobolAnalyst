@@ -639,7 +639,9 @@
             _elapsedDisplay = $"{finalMin}:{State.Elapsed.Seconds:D2}";
 
             // Stop the timer task.
-            _timerCts?.Cancel();
+            // Guard against ObjectDisposedException: Blazor may dispose the CancellationTokenSource
+            // when the SignalR circuit disconnects before this finally block executes.
+            try { _timerCts?.Cancel(); } catch (ObjectDisposedException) { }
             State.TimerRunning = false;
             State.Status = succeeded ? AnalysisStatus.Complete : AnalysisStatus.Failed;
             _analysing = false;
