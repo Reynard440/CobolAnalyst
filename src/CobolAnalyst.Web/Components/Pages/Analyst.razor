@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @implements IDisposable
 @using CobolAnalyst.Web.Core.Cache
+@using CobolAnalyst.Web.Core.Export
 @using CobolAnalyst.Web.Core.Prompts
 @using CobolAnalyst.Web.Core.State
 @inject AnalysisStateService State
@@ -14,6 +15,7 @@
 @inject PromptTemplateStore TemplateStore
 @inject IConfiguration Config
 @inject IJSRuntime JS
+@inject WordDocumentExporter WordExporter
 
 <PageTitle>CobolAnalyst — Analyst</PageTitle>
 
@@ -107,13 +109,13 @@
                 <input type="checkbox" @bind="_forceReanalyse" disabled="@_analysing" />
                 Force re-analyse
             </label>
-            <button class="btn" @onclick="ToggleQueryPanel"
-                    disabled="@(_session is null || _analysing)">
-                Query Rules
-            </button>
             <button class="btn" @onclick="NavigateToGenerate"
                     disabled="@(_session is null)">
                 Generate C# Scaffold
+            </button>
+            <button class="btn" @onclick="ExportWordDoc"
+                    disabled="@(_session is null || _analysing || _exporting)">
+                @(_exporting ? "Exporting…" : "⬇ Export Report")
             </button>
             <button class="btn btn-danger" @onclick="ClearSession"
                     disabled="@_analysing">
@@ -352,33 +354,6 @@
                 }
             </div>
 
-            <!-- Query panel -->
-            @if (_showQuery)
-            {
-                <div class="query-panel">
-                    <div class="page-header">Query Rules</div>
-                    <div class="query-input-row">
-                        <input class="query-input" placeholder="e.g. which rules handle tax calculations?"
-                               @bind="_queryText" @bind:event="oninput"
-                               @onkeydown="HandleQueryKey" disabled="@_querying" />
-                        @if (_querying)
-                        {
-                            <button class="btn btn-sm btn-danger" @onclick="CancelQuery">Cancel</button>
-                        }
-                        else
-                        {
-                            <button class="btn btn-primary btn-sm" @onclick="RunQuery"
-                                    disabled="@string.IsNullOrWhiteSpace(_queryText)">
-                                Ask
-                            </button>
-                        }
-                    </div>
-                    @if (_queryResult.Length > 0)
-                    {
-                        <div class="query-result">@_queryResult</div>
-                    }
-                </div>
-            }
         }
     </section>
 </div>
@@ -405,6 +380,7 @@
 
     private bool _dragging;
     private bool _forceReanalyse;
+    private bool _exporting;
     private string? _globalError;
     private string _activeModel = "";
     private CancellationTokenSource? _cts;
@@ -417,13 +393,6 @@
     private string _filterFile = "";
     private string _filterConfidence = "";
     private string _filterDecision = "";
-
-    // Query
-    private bool _showQuery;
-    private string _queryText = "";
-    private string _queryResult = "";
-    private bool _querying;
-    private CancellationTokenSource? _queryCts;
 
     private bool CanAnalyse =>
         _stagedPaths.Count > 0 &&
@@ -680,59 +649,39 @@
             ? level : ConfidenceLevel.High;
     }
 
-    private void ToggleQueryPanel() => _showQuery = !_showQuery;
-
-    private async Task RunQuery()
-    {
-        if (_session is null || string.IsNullOrWhiteSpace(_queryText)) return;
-
-        _queryCts?.Cancel();
-        _queryCts?.Dispose();
-        _queryCts = new CancellationTokenSource();
-
-        _querying = true;
-        _queryResult = "";
-        StateHasChanged();
-
-        try
-        {
-            var prompt = PromptBuilder.BuildQueryPrompt(_queryText, _session.Rules);
-            await foreach (var token in LlmClient.StreamCompletionAsync(prompt, _queryCts.Token))
-            {
-                _queryResult += token;
-                await InvokeAsync(StateHasChanged);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            if (_queryResult.Length == 0)
-                _queryResult = "(cancelled)";
-        }
-        catch (Exception ex)
-        {
-            _queryResult = $"Query error: {ex.Message}";
-        }
-        finally
-        {
-            _querying = false;
-            StateHasChanged();
-        }
-    }
-
-    private void CancelQuery()
-    {
-        _queryCts?.Cancel();
-    }
-
-    private async Task HandleQueryKey(KeyboardEventArgs e)
-    {
-        if (e.Key == "Enter") await RunQuery();
-    }
-
     private void NavigateToGenerate()
     {
         if (_session is not null)
             Nav.NavigateTo("/generate");
+    }
+
+    private async Task ExportWordDoc()
+    {
+        if (_session is null) return;
+        _exporting = true;
+        _globalError = null;
+        StateHasChanged();
+
+        try
+        {
+            var bytes = WordExporter.GenerateReport(_session);
+            var base64 = Convert.ToBase64String(bytes);
+            var safeName = string.Concat(
+                _session.Name.Select(c => char.IsLetterOrDigit(c) || c == '-' ? c : '_'));
+            var fileName = $"{safeName}_analysis_{DateTime.Now:yyyyMMdd}.docx";
+
+            await JS.InvokeVoidAsync("downloadBinaryFile", fileName, base64,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        }
+        catch (Exception ex)
+        {
+            _globalError = $"Export failed: {ex.Message}";
+        }
+        finally
+        {
+            _exporting = false;
+            StateHasChanged();
+        }
     }
 
     private void ClearSession()
@@ -740,9 +689,6 @@
         _cts?.Cancel();
         _timerCts?.Cancel();
         _progressRows = [];
-        _queryText = "";
-        _queryResult = "";
-        _showQuery = false;
         _globalError = null;
         _elapsedDisplay = "";
         _activeModel = "";
@@ -786,8 +732,6 @@
         _cts?.Dispose();
         _timerCts?.Cancel();
         _timerCts?.Dispose();
-        _queryCts?.Cancel();
-        _queryCts?.Dispose();
     }
 
     private static string FormatSize(long bytes) =>
