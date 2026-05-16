@@ -2,6 +2,7 @@ using CobolAnalyst.Web.Components;
 using CobolAnalyst.Web.Core.Analysis;
 using CobolAnalyst.Web.Core.Cache;
 using CobolAnalyst.Web.Core.Chunking;
+using CobolAnalyst.Web.Core.Export;
 using CobolAnalyst.Web.Core.Editing;
 using CobolAnalyst.Web.Core.Generation;
 using CobolAnalyst.Web.Core.KnowledgeBase;
@@ -56,6 +57,7 @@ builder.Services.AddScoped<IAnalysisOrchestrator, AnalysisOrchestrator>();
 builder.Services.AddTransient<CSharpScaffoldGenerator>();
 builder.Services.AddTransient<QueryService>();
 builder.Services.AddTransient<CodeEditorService>();
+builder.Services.AddTransient<WordDocumentExporter>();
 
 var app = builder.Build();
 

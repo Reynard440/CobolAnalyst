@@ -38,6 +38,22 @@
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         };
+        window.downloadBinaryFile = function (filename, base64Content, mimeType) {
+            var bytes = atob(base64Content);
+            var buffer = new Uint8Array(bytes.length);
+            for (var i = 0; i < bytes.length; i++) {
+                buffer[i] = bytes.charCodeAt(i);
+            }
+            var blob = new Blob([buffer], { type: mimeType });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
 </script>
 </body>
 
