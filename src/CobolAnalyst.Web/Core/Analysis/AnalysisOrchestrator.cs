@@ -197,11 +197,36 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
             trimmed = trimmed.Trim();
         }
 
-        trimmed = CloseBrackets(trimmed);
+        // Pass 1: standard trailing-comma strip + bracket close
+        var pass1 = CloseBrackets(trimmed);
+        var result = TryParseRules(pass1, chunk);
+        if (result is not null) return result;
 
+        // Pass 2: unterminated-string repair (LLM hit token limit mid-value)
+        // then re-run bracket close on the cleaned JSON
+        var truncated = RepairTruncatedString(trimmed);
+        if (truncated != trimmed)
+        {
+            var pass2 = CloseBrackets(truncated);
+            result = TryParseRules(pass2, chunk);
+            if (result is not null)
+            {
+                _logger.LogInformation(
+                    "Recovered {Count} rules from truncated JSON for chunk {Label}",
+                    result.Count, chunk.Label);
+                return result;
+            }
+        }
+
+        _logger.LogWarning("JSON parse failed for chunk {Label} after all repair attempts", chunk.Label);
+        return [];
+    }
+
+    private List<ExtractedRule>? TryParseRules(string json, CobolChunk chunk)
+    {
         try
         {
-            using var doc = JsonDocument.Parse(trimmed);
+            using var doc = JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty("rules", out var rulesEl))
                 return [];
 
@@ -229,10 +254,9 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
             }
             return rules;
         }
-        catch (JsonException ex)
+        catch (JsonException)
         {
-            _logger.LogWarning(ex, "JSON parse failed for chunk {Label} after repair attempt", chunk.Label);
-            return [];
+            return null; // caller tries the next repair strategy
         }
     }
 
@@ -263,7 +287,12 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
                 {
                     stack.Pop();
                     depth--;
-                    if (depth <= 1) lastCompleteOuterClose = i;
+                    // depth <= 2: fires when a rule object closes (3→2) or the rules
+                    // array closes (2→1) or the outer object closes (1→0).
+                    // Previously was depth <= 1 which never fired for rule-object closes,
+                    // making the truncation fallback unreachable in practice.
+                    if (depth <= 2 && (ch == '}' || ch == ']'))
+                        lastCompleteOuterClose = i;
                 }
             }
         }
@@ -284,11 +313,10 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         }
         catch (JsonException)
         {
-            // Simple closing failed — truncate to last complete object
+            // Simple closing failed — truncate to last complete rule object
             if (lastCompleteOuterClose > 0)
             {
                 var truncated = json[..(lastCompleteOuterClose + 1)];
-                // Close any remaining brackets
                 return CloseBracketsSimple(truncated);
             }
             return repaired;
@@ -317,6 +345,64 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         var sb = new StringBuilder(json);
         while (stack.Count > 0) sb.Append(stack.Pop());
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Handles the case where the LLM hit its token limit mid-string value,
+    /// leaving an unterminated string literal (e.g. "description": "text that gets cut).
+    /// Finds the start of the last unterminated string, strips the partial key:value
+    /// back to the previous complete key-value pair, and returns the truncated JSON.
+    /// The caller must then run CloseBrackets on the result.
+    /// Returns the original string unchanged if no unterminated string is found.
+    /// </summary>
+    private static string RepairTruncatedString(string json)
+    {
+        int lastStringStart = -1;
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            char ch = json[i];
+            if (escaped) { escaped = false; continue; }
+            if (ch == '\\' && inString) { escaped = true; continue; }
+            if (ch == '"')
+            {
+                if (!inString) { inString = true; lastStringStart = i; }
+                else            inString = false;
+            }
+        }
+
+        if (!inString || lastStringStart <= 0)
+            return json; // no unterminated string, nothing to repair
+
+        // Truncate to just before the unterminated string opener.
+        // Walk backwards stripping: the partial string start quote, any preceding
+        // whitespace, the colon separator (property key was written but not its value),
+        // any preceding whitespace, the property key string, and any trailing comma.
+        var truncated = json[..lastStringStart].TrimEnd();
+
+        // Strip colon — "key": <we are here>  →  remove ": " back to after the key
+        if (truncated.EndsWith(':'))
+            truncated = truncated[..^1].TrimEnd();
+
+        // Strip the property key that had no value written
+        if (truncated.EndsWith('"'))
+        {
+            // find the matching opening quote of the key
+            int keyEnd = truncated.Length - 1; // the closing " of the key
+            int keyStart = keyEnd - 1;
+            while (keyStart > 0 && truncated[keyStart] != '"')
+                keyStart--;
+            if (keyStart > 0)
+                truncated = truncated[..keyStart].TrimEnd();
+        }
+
+        // Strip trailing comma left from the previous complete value
+        if (truncated.EndsWith(','))
+            truncated = truncated[..^1].TrimEnd();
+
+        return truncated;
     }
 
     private static string StripTrailingCommas(string json)
@@ -470,9 +556,28 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
 
 file static class JsonElementExtensions
 {
+    /// <summary>
+    /// Returns a string for any JSON value kind the LLM might produce for a string field.
+    /// Handles arrays (LLM sometimes returns ["note1","note2"] for a string field — joined with "; "),
+    /// numbers, booleans, and nulls without throwing.
+    /// </summary>
     public static string? TryGetString(this JsonElement el, string propertyName)
     {
-        return el.TryGetProperty(propertyName, out var prop) ? prop.GetString() : null;
+        if (!el.TryGetProperty(propertyName, out var prop)) return null;
+
+        return prop.ValueKind switch
+        {
+            JsonValueKind.String => prop.GetString(),
+            JsonValueKind.Null   => null,
+            JsonValueKind.Array  => string.Join("; ", prop.EnumerateArray()
+                                        .Select(e => e.ValueKind == JsonValueKind.String
+                                            ? e.GetString() ?? ""
+                                            : e.GetRawText())),
+            JsonValueKind.Number => prop.GetRawText(),
+            JsonValueKind.True   => "true",
+            JsonValueKind.False  => "false",
+            _                    => prop.GetRawText()
+        };
     }
 
     public static bool TryGetBool(this JsonElement el, string propertyName)
