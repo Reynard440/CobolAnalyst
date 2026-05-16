@@ -1,5 +1,6 @@
-using CobolAnalyst.Web.Models;
+using CobolAnalyst.Web.Core.Analysis;
 using CobolAnalyst.Web.Core.Prompts;
+using CobolAnalyst.Web.Models;
 
 namespace CobolAnalyst.Web.Core.Llm;
 
@@ -69,11 +70,15 @@ public static class PromptBuilder
             {
               "id": "<uuid>",
               "label": "<short name, 8 words or fewer>",
-              "type": "<BusinessRule|Validation|Calculation|DataTransformation|ControlFlow>",
+              "type": "<BusinessRule|Validation|Calculation|DataTransformation|ControlFlow|HardcodedValue|Workflow|CobolArtifact|Constraint|ErrorHandling|DataMapping>",
               "description": "<plain English, 3 sentences or fewer>",
               "source_reference": "<method / paragraph name and line range>",
               "confidence": "<High|Medium|Low>",
-              "migration_notes": "<C# migration concerns>"
+              "migration_notes": "<C# migration concerns>",
+              "risk": "<high|medium|low>",
+              "code_snippet": "<relevant source lines>",
+              "cobol_origin": false,
+              "notes": "<optional analyst notes>"
             }
           ]
         }
@@ -116,13 +121,14 @@ public static class PromptBuilder
             : "Do NOT extract or reference: inline comments, FILLER fields, section/division headers that contain no logic, STOP RUN statements, or DISPLAY statements used only for debugging.";
         string suppressList = template?.SuppressionOverride is { Length: > 0 } s ? s : defaultSuppress;
 
-        var adaptiveInstruction = chunk.Complexity switch
-        {
-            ComplexityTier.Low => "Be concise. Extract only the primary rule; omit trivial assignments.",
-            ComplexityTier.Medium => "Describe each conditional branch. Note any side-effects on variables or state.",
-            ComplexityTier.High => "Trace every execution path and flag all edge cases. Identify implicit state dependencies and flag them in migration_notes.",
-            _ => "Be concise."
-        };
+        // Full complexity analysis — replaces the one-line tier instruction
+        var complexityReport = ComplexityAnalyzer.Analyze(chunk.SourceText);
+        var complexityBlock = complexityReport.ToPromptBlock();
+
+        // COBOL pattern prescan
+        var fileType = Path.GetExtension(chunk.FileName);
+        var patternFlags = CobolPatterns.PrescanPatterns(chunk.SourceText, fileType);
+        var patternBlock = CobolPatterns.FormatForPrompt(patternFlags);
 
         var hintLines = knowledgeHints.Select(h => $"  - [{h.Type}] {h.Label}: {h.Description}").ToList();
         var hintsSection = hintLines.Count > 0
@@ -137,7 +143,8 @@ public static class PromptBuilder
         {
             persona,
             string.Empty,
-            $"Complexity tier: {chunk.Complexity}. {adaptiveInstruction}",
+            complexityBlock,
+            patternBlock,
             string.Empty,
             hintsSection,
             contextSection,

@@ -1,7 +1,7 @@
 namespace CobolAnalyst.Web.Models;
 
 /// <summary>Complexity tier assigned to a COBOL chunk before LLM analysis.</summary>
-public enum ComplexityTier { Low, Medium, High }
+public enum ComplexityTier { Low, Medium, High, Critical }
 
 /// <summary>A paragraph-boundary slice of a COBOL file ready for LLM analysis.</summary>
 public sealed class CobolChunk

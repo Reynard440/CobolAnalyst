@@ -47,7 +47,8 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         List<CobolChunk> chunks,
         IProgress<AnalysisProgressEvent>? progress,
         CancellationToken cancellationToken = default,
-        string? contextBlock = null)
+        string? contextBlock = null,
+        Dictionary<string, List<string>>? symbolTable = null)
     {
         var sw = Stopwatch.StartNew();
         var allRules = new ConcurrentBag<ExtractedRule>();
@@ -55,7 +56,8 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         var activeTemplate = _templates.GetActive();
 
         var tasks = chunks.Select(chunk => ProcessChunkAsync(
-            chunk, sem, allRules, progress, sw, activeTemplate, contextBlock, cancellationToken)).ToList();
+            chunk, sem, allRules, progress, sw, activeTemplate, contextBlock,
+            symbolTable, cancellationToken)).ToList();
 
         await Task.WhenAll(tasks);
 
@@ -78,6 +80,7 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         Stopwatch sw,
         Models.PromptTemplate? activeTemplate,
         string? contextBlock,
+        Dictionary<string, List<string>>? symbolTable,
         CancellationToken ct)
     {
         progress?.Report(new AnalysisProgressEvent
@@ -98,7 +101,21 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
             });
 
             var hints = _kb.GetTopHints(chunk.SourceText, 3);
-            var prompt = PromptBuilder.BuildExtractionPrompt(chunk, hints, activeTemplate, contextBlock);
+
+            // Cross-file dependency context
+            string? depsBlock = null;
+            if (symbolTable is { Count: > 0 })
+            {
+                var deps = CrossFileDependencyDetector.DetectDependencies(
+                    chunk.SourceText, symbolTable, chunk.FileName);
+                depsBlock = CrossFileDependencyDetector.FormatForPrompt(deps);
+            }
+
+            var fullContext = string.IsNullOrEmpty(depsBlock)
+                ? contextBlock
+                : (contextBlock ?? string.Empty) + "\n" + depsBlock;
+
+            var prompt = PromptBuilder.BuildExtractionPrompt(chunk, hints, activeTemplate, fullContext);
 
             var model = _llm.SelectedModel;
             var cached = _cache.TryGet(chunk.SourceText, prompt, model);
@@ -167,6 +184,10 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
     {
         var trimmed = rawJson.Trim();
 
+        // Strip <think>...</think> blocks (qwen3 models)
+        trimmed = System.Text.RegularExpressions.Regex.Replace(
+            trimmed, @"<think>[\s\S]*?</think>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim();
+
         // Strip any markdown fences the model might have added
         if (trimmed.StartsWith("```"))
         {
@@ -194,12 +215,14 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
                     Description = el.TryGetString("description") ?? string.Empty,
                     CobolReference = el.TryGetString("source_reference") ?? el.TryGetString("cobol_reference") ?? chunk.Label,
                     MigrationNotes = el.TryGetString("migration_notes") ?? string.Empty,
-                    Type = Enum.TryParse<RuleType>(
-                        (el.TryGetString("type") ?? "BusinessRule").Replace(" ", ""),
-                        out var t) ? t : RuleType.BusinessRule,
+                    Type = MapRuleType(el.TryGetString("type") ?? "BusinessRule"),
                     Confidence = Enum.TryParse<ConfidenceLevel>(
                         el.TryGetString("confidence") ?? "Medium",
-                        out var c) ? c : ConfidenceLevel.Medium
+                        out var c) ? c : ConfidenceLevel.Medium,
+                    Risk = el.TryGetString("risk") ?? "low",
+                    CodeSnippet = el.TryGetString("code_snippet") ?? string.Empty,
+                    CobolOrigin = el.TryGetBool("cobol_origin"),
+                    Notes = el.TryGetString("notes") ?? string.Empty
                 };
                 if (rule.Label.Trim().Length > 0)
                     rules.Add(rule);
@@ -215,6 +238,65 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
 
     private static string CloseBrackets(string json)
     {
+        // Strip trailing commas before closing brackets
+        json = StripTrailingCommas(json);
+
+        var stack = new Stack<char>();
+        bool inString = false;
+        bool escaped = false;
+        int lastCompleteOuterClose = -1;
+        int depth = 0;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            var ch = json[i];
+            if (escaped) { escaped = false; continue; }
+            if (ch == '\\' && inString) { escaped = true; continue; }
+            if (ch == '"') { inString = !inString; continue; }
+            if (inString) continue;
+
+            if (ch == '{') { stack.Push('}'); depth++; }
+            else if (ch == '[') { stack.Push(']'); depth++; }
+            else if (ch == '}' || ch == ']')
+            {
+                if (stack.Count > 0 && stack.Peek() == ch)
+                {
+                    stack.Pop();
+                    depth--;
+                    if (depth <= 1) lastCompleteOuterClose = i;
+                }
+            }
+        }
+
+        if (stack.Count == 0)
+            return json;
+
+        // Try simple bracket closing first
+        var sb = new StringBuilder(json);
+        while (stack.Count > 0) sb.Append(stack.Pop());
+        var repaired = sb.ToString();
+
+        // Validate the simple repair
+        try
+        {
+            using var doc = JsonDocument.Parse(repaired);
+            return repaired;
+        }
+        catch (JsonException)
+        {
+            // Simple closing failed — truncate to last complete object
+            if (lastCompleteOuterClose > 0)
+            {
+                var truncated = json[..(lastCompleteOuterClose + 1)];
+                // Close any remaining brackets
+                return CloseBracketsSimple(truncated);
+            }
+            return repaired;
+        }
+    }
+
+    private static string CloseBracketsSimple(string json)
+    {
         var stack = new Stack<char>();
         bool inString = false;
         bool escaped = false;
@@ -228,11 +310,8 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
 
             if (ch == '{') stack.Push('}');
             else if (ch == '[') stack.Push(']');
-            else if (ch == '}' || ch == ']')
-            {
-                if (stack.Count > 0 && stack.Peek() == ch)
-                    stack.Pop();
-            }
+            else if ((ch == '}' || ch == ']') && stack.Count > 0 && stack.Peek() == ch)
+                stack.Pop();
         }
 
         var sb = new StringBuilder(json);
@@ -240,24 +319,69 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         return sb.ToString();
     }
 
+    private static string StripTrailingCommas(string json)
+    {
+        var sb = new StringBuilder(json.Length);
+        bool inString = false;
+        bool escaped = false;
+
+        for (int i = 0; i < json.Length; i++)
+        {
+            var ch = json[i];
+            if (escaped) { escaped = false; sb.Append(ch); continue; }
+            if (ch == '\\' && inString) { escaped = true; sb.Append(ch); continue; }
+            if (ch == '"') { inString = !inString; sb.Append(ch); continue; }
+            if (inString) { sb.Append(ch); continue; }
+
+            if (ch == ',')
+            {
+                // Look ahead for closing bracket (skip whitespace)
+                int j = i + 1;
+                while (j < json.Length && char.IsWhiteSpace(json[j])) j++;
+                if (j < json.Length && (json[j] == '}' || json[j] == ']'))
+                    continue; // skip this comma
+            }
+            sb.Append(ch);
+        }
+        return sb.ToString();
+    }
+
     private static List<ExtractedRule> Deduplicate(List<ExtractedRule> rules)
     {
-        var kept = new List<ExtractedRule>();
         var labelAppearances = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Pass 1: broad dedup at 0.80 threshold using SequenceMatcher-style LCS ratio
+        var pass1 = DeduplicatePass(rules, 0.80, sameTypeOnly: false, labelAppearances);
+
+        // Pass 2: category-aware dedup at 0.72 threshold (same RuleType only)
+        var pass2 = DeduplicatePass(pass1, 0.72, sameTypeOnly: true, labelAppearances);
+
+        return pass2;
+    }
+
+    private static List<ExtractedRule> DeduplicatePass(
+        List<ExtractedRule> rules,
+        double threshold,
+        bool sameTypeOnly,
+        Dictionary<string, int> labelAppearances)
+    {
+        var kept = new List<ExtractedRule>();
 
         foreach (var rule in rules)
         {
             bool isDuplicate = false;
             foreach (var existing in kept)
             {
-                var similarity = JaccardSimilarity(
+                if (sameTypeOnly && existing.Type != rule.Type)
+                    continue;
+
+                var similarity = SequenceMatcherRatio(
                     NormaliseText(rule.Description),
                     NormaliseText(existing.Description));
 
-                if (similarity >= DeduplicationThreshold)
+                if (similarity >= threshold)
                 {
                     isDuplicate = true;
-                    // Track cross-cutting appearances on the surviving rule
                     var key = existing.Id;
                     labelAppearances[key] = labelAppearances.GetValueOrDefault(key) + 1;
                     if (labelAppearances[key] >= CrossCuttingThreshold - 1)
@@ -267,7 +391,8 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
             }
             if (!isDuplicate)
             {
-                labelAppearances[rule.Id] = 1;
+                if (!labelAppearances.ContainsKey(rule.Id))
+                    labelAppearances[rule.Id] = 1;
                 kept.Add(rule);
             }
         }
@@ -275,14 +400,56 @@ public sealed class AnalysisOrchestrator : IAnalysisOrchestrator
         return kept;
     }
 
-    private static double JaccardSimilarity(string a, string b)
+    private static double SequenceMatcherRatio(string a, string b)
     {
-        var setA = new HashSet<string>(a.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-        var setB = new HashSet<string>(b.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-        if (setA.Count == 0 && setB.Count == 0) return 1.0;
-        var intersection = setA.Intersect(setB).Count();
-        var union = setA.Union(setB).Count();
-        return union == 0 ? 0 : (double)intersection / union;
+        if (a.Length == 0 && b.Length == 0) return 1.0;
+        if (a.Length == 0 || b.Length == 0) return 0.0;
+
+        int lcs = LongestCommonSubsequenceLength(a, b);
+        return 2.0 * lcs / (a.Length + b.Length);
+    }
+
+    private static int LongestCommonSubsequenceLength(string a, string b)
+    {
+        int m = a.Length, n = b.Length;
+        var prev = new int[n + 1];
+        var curr = new int[n + 1];
+
+        for (int i = 1; i <= m; i++)
+        {
+            for (int j = 1; j <= n; j++)
+            {
+                curr[j] = a[i - 1] == b[j - 1]
+                    ? prev[j - 1] + 1
+                    : Math.Max(prev[j], curr[j - 1]);
+            }
+            (prev, curr) = (curr, prev);
+            Array.Clear(curr, 0, n + 1);
+        }
+
+        return prev[n];
+    }
+
+    private static RuleType MapRuleType(string raw)
+    {
+        var key = raw.Trim().ToLowerInvariant().Replace(" ", "").Replace("_", "");
+        return key switch
+        {
+            "businessrule"       => RuleType.BusinessRule,
+            "calculation"        => RuleType.Calculation,
+            "validation"         => RuleType.Validation,
+            "datatransform"      => RuleType.DataTransformation,
+            "datatransformation" => RuleType.DataTransformation,
+            "hardcodedvalue"     => RuleType.HardcodedValue,
+            "workflow"           => RuleType.Workflow,
+            "cobolartifact"      => RuleType.CobolArtifact,
+            "constraint"         => RuleType.Constraint,
+            "errorhandling"      => RuleType.ErrorHandling,
+            "datamapping"        => RuleType.DataMapping,
+            "controlflow"        => RuleType.ControlFlow,
+            _ => Enum.TryParse<RuleType>(raw.Replace(" ", ""), ignoreCase: true, out var t)
+                 ? t : RuleType.BusinessRule
+        };
     }
 
     private static string NormaliseText(string text)
@@ -306,5 +473,11 @@ file static class JsonElementExtensions
     public static string? TryGetString(this JsonElement el, string propertyName)
     {
         return el.TryGetProperty(propertyName, out var prop) ? prop.GetString() : null;
+    }
+
+    public static bool TryGetBool(this JsonElement el, string propertyName)
+    {
+        return el.TryGetProperty(propertyName, out var prop)
+            && prop.ValueKind == JsonValueKind.True;
     }
 }

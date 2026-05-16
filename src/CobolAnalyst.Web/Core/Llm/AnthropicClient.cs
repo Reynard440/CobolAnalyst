@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using CobolAnalyst.Web.Core.Security;
 using CobolAnalyst.Web.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -13,13 +14,14 @@ namespace CobolAnalyst.Web.Core.Llm;
 /// </summary>
 public sealed class OllamaClient : ILlmClient
 {
-    private const int NumPredict     = 1500;
-    private const int NumPredictChat = 4096;
-    private const double Temperature = 0.1;
+    private const int DefaultNumPredict = 1500;
+    private const int NumPredictChat   = 4096;
+    private const double Temperature   = 0.1;
 
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly ILogger<OllamaClient> _logger;
+    private readonly NetworkAuditLogger _audit;
 
     // Volatile so UI-thread writes are visible to background analysis tasks.
     private volatile string _selectedModel;
@@ -32,10 +34,11 @@ public sealed class OllamaClient : ILlmClient
     }
 
     /// <summary>Initialises the client from configuration.</summary>
-    public OllamaClient(HttpClient http, IConfiguration config, ILogger<OllamaClient> logger)
+    public OllamaClient(HttpClient http, IConfiguration config, ILogger<OllamaClient> logger, NetworkAuditLogger audit)
     {
         _http = http;
         _logger = logger;
+        _audit = audit;
         _baseUrl = (config["Ollama:BaseUrl"] ?? "http://localhost:11434").TrimEnd('/');
         _selectedModel = config["Ollama:DefaultModel"] ?? "qwen2.5-coder:32b";
     }
@@ -46,16 +49,19 @@ public sealed class OllamaClient : ILlmClient
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var model = _selectedModel;
+        _audit.LogOllamaRequest();
+
+        var numPredict = GetNumPredictForModel(model);
         var body = new
         {
             model,
             messages = new[] { new { role = "user", content = prompt } },
             stream = true,
-            options = new { temperature = Temperature, num_predict = NumPredict }
+            options = new { temperature = Temperature, num_predict = numPredict }
         };
 
         var json = JsonSerializer.Serialize(body);
-        _logger.LogDebug("Ollama request: model={Model}", model);
+        _logger.LogDebug("Ollama request: model={Model}, num_predict={NumPredict}", model, numPredict);
 
         HttpResponseMessage response;
         try
@@ -120,6 +126,7 @@ public sealed class OllamaClient : ILlmClient
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var effectiveModel = model ?? _selectedModel;
+        _audit.LogOllamaRequest();
 
         // Build messages: system + conversation history (exclude system turns)
         var messages = new List<object>
@@ -216,6 +223,28 @@ public sealed class OllamaClient : ILlmClient
             _logger.LogWarning(ex, "Could not retrieve model list from Ollama at {Url}", _baseUrl);
             return [];
         }
+    }
+
+    private int GetNumPredictForModel(string model)
+    {
+        var lower = model.ToLowerInvariant();
+        if (lower.Contains("3b") || lower.Contains("1b")) return 800;
+        if (lower.Contains("7b") || lower.Contains("8b")) return 1200;
+        if (lower.Contains("14b")) return 1500;
+        if (lower.Contains("32b") || lower.Contains("34b")) return 2000;
+        if (lower.Contains("70b") || lower.Contains("72b")) return 2500;
+        return DefaultNumPredict;
+    }
+
+    private static TimeSpan GetTimeoutForModel(string model)
+    {
+        var lower = model.ToLowerInvariant();
+        if (lower.Contains("3b") || lower.Contains("1b")) return TimeSpan.FromSeconds(60);
+        if (lower.Contains("7b") || lower.Contains("8b")) return TimeSpan.FromSeconds(120);
+        if (lower.Contains("14b")) return TimeSpan.FromSeconds(200);
+        if (lower.Contains("32b") || lower.Contains("34b")) return TimeSpan.FromSeconds(400);
+        if (lower.Contains("70b") || lower.Contains("72b")) return TimeSpan.FromSeconds(600);
+        return TimeSpan.FromSeconds(200);
     }
 
     private static async Task<string?> ReadLineGuarded(StreamReader reader, CancellationToken ct)

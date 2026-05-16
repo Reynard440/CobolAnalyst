@@ -39,5 +39,6 @@ public interface IAnalysisOrchestrator
         List<CobolChunk> chunks,
         IProgress<AnalysisProgressEvent>? progress,
         CancellationToken cancellationToken = default,
-        string? contextBlock = null);
+        string? contextBlock = null,
+        Dictionary<string, List<string>>? symbolTable = null);
 }

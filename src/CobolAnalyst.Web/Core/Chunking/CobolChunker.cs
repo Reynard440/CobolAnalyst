@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using CobolAnalyst.Web.Core.Analysis;
+using CobolAnalyst.Web.Core.Config;
 using CobolAnalyst.Web.Models;
 using Microsoft.Extensions.Logging;
 
@@ -18,7 +19,8 @@ public sealed partial class CobolChunker : ICobolChunker
 
     private static readonly string[] CobolExtensions = [".cbl", ".cob", ".cpy"];
     private static readonly string[] VbExtensions   = [".vb", ".bas", ".cls", ".frm", ".vbs"];
-    private static readonly string[] AllExtensions  = [.. CobolExtensions, .. VbExtensions];
+    private static readonly string[] SqlExtensions  = [".sql"];
+    private static readonly string[] AllExtensions  = [.. CobolExtensions, .. VbExtensions, .. SqlExtensions];
 
     // COBOL: line whose Area A contains a paragraph label followed by a period
     [GeneratedRegex(@"^\s{6,7}([A-Z][A-Z0-9\-]*)\s*\.\s*$", RegexOptions.IgnoreCase)]
@@ -35,6 +37,12 @@ public sealed partial class CobolChunker : ICobolChunker
         @"(?:Sub|Function|Property|Class|Module|Namespace|Interface|Structure|Enum)\s+(\w+)",
         RegexOptions.IgnoreCase)]
     private static partial Regex VbBoundary();
+
+    // SQL: CREATE [OR ALTER] PROCEDURE/PROC/FUNCTION boundary
+    [GeneratedRegex(
+        @"^\s*CREATE\s+(?:OR\s+ALTER\s+)?(?:PROCEDURE|PROC|FUNCTION)\s+(?:\[?[\w.]+\]?\.)?(\[?[\w]+\]?)",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex SqlBoundary();
 
     private readonly ComplexityScorer _scorer;
     private readonly ILogger<CobolChunker> _logger;
@@ -58,7 +66,7 @@ public sealed partial class CobolChunker : ICobolChunker
         {
             cancellationToken.ThrowIfCancellationRequested();
             var ext = Path.GetExtension(path).ToLowerInvariant();
-            if (!AllExtensions.Contains(ext))
+            if (!AllExtensions.Contains(ext) && !Config.LanguageConfig.IsSupported(ext))
                 throw new ArgumentException(
                     $"Unsupported extension '{ext}'. Supported: {string.Join(", ", AllExtensions)}");
 
@@ -83,11 +91,49 @@ public sealed partial class CobolChunker : ICobolChunker
             files.Add(cobolFile);
 
             bool isVb = VbExtensions.Contains(ext);
-            var raw = SplitIntoRawChunks(Path.GetFileName(path), isVb, lines);
+            bool isSql = SqlExtensions.Contains(ext);
+            bool isCobol = CobolExtensions.Contains(ext);
+            List<CobolChunk> raw;
+            if (isSql)
+                raw = SplitSqlIntoRawChunks(Path.GetFileName(path), lines);
+            else if (isVb || isCobol)
+                raw = SplitIntoRawChunks(Path.GetFileName(path), isVb, lines);
+            else
+                raw = [new CobolChunk { FileName = Path.GetFileName(path), Label = "FULL-FILE", StartLine = 1, EndLine = lines.Length, SourceText = text }];
             var merged = MergeSmallChunks(raw);
+            var final = new List<CobolChunk>();
             foreach (var c in merged)
+            {
                 c.Complexity = _scorer.Score(c);
-            allChunks.AddRange(merged);
+                var report = ComplexityAnalyzer.Analyze(c.SourceText);
+                var tier = ComplexityAnalyzer.ToComplexityTier(report.NestingComplexity);
+                c.Complexity = tier;
+
+                if (report.IsHighComplexity && ChunkSplitter.EstimateTokens(c.SourceText) > ChunkSplitter.DefaultTokenThreshold)
+                {
+                    var splits = ChunkSplitter.AutoSplitIfNeeded(c.SourceText, ChunkSplitter.DefaultTokenThreshold, report);
+                    if (splits.Count > 1)
+                    {
+                        int branchNum = 0;
+                        foreach (var sub in splits)
+                        {
+                            branchNum++;
+                            final.Add(new CobolChunk
+                            {
+                                FileName = c.FileName,
+                                Label = $"{c.Label} [{sub.Label}]",
+                                StartLine = c.StartLine,
+                                EndLine = c.EndLine,
+                                SourceText = sub.Code,
+                                Complexity = tier
+                            });
+                        }
+                        continue;
+                    }
+                }
+                final.Add(c);
+            }
+            allChunks.AddRange(final);
 
             _logger.LogInformation("Chunked {File} ({Lang}): {Count} chunks",
                 cobolFile.FileName, isVb ? "VB" : "COBOL", merged.Count);
@@ -171,6 +217,47 @@ public sealed partial class CobolChunker : ICobolChunker
 
         if (pending is not null) result.Add(pending);
         return result;
+    }
+
+    private static List<CobolChunk> SplitSqlIntoRawChunks(string fileName, string[] lines)
+    {
+        var chunks = new List<CobolChunk>();
+        var currentLabel = "SQL-PREAMBLE";
+        var currentStart = 1;
+        var currentLines = new List<string>();
+
+        void Flush(int endLine)
+        {
+            if (currentLines.Count == 0) return;
+            chunks.Add(new CobolChunk
+            {
+                FileName = fileName,
+                Label = currentLabel,
+                StartLine = currentStart,
+                EndLine = endLine,
+                SourceText = string.Join("\n", currentLines)
+            });
+        }
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var lineNo = i + 1;
+            var m = SqlBoundary().Match(line);
+            if (m.Success)
+            {
+                Flush(lineNo - 1);
+                currentLabel = m.Groups[1].Value.Trim('[', ']');
+                currentStart = lineNo;
+                currentLines = [line];
+            }
+            else
+            {
+                currentLines.Add(line);
+            }
+        }
+        Flush(lines.Length);
+        return chunks.Where(c => c.SourceText.Trim().Length > 0).ToList();
     }
 
     private static string ExtractLabel(string line, bool isVb)
