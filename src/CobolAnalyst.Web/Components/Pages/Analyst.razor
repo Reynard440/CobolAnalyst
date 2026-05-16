@@ -324,7 +324,24 @@
                             }
                         </div>
                         <p class="rule-description">@rule.Description</p>
-                        <div class="rule-reference">@rule.CobolReference &mdash; @rule.SourceFile</div>
+                        <div class="rule-reference-toggle" @onclick="() => ToggleSnippet(rule.Id)"
+                             title="@(_expandedSnippets.Contains(rule.Id) ? "Hide source code" : "Show source code")">
+                            <span class="toggle-chevron">@(_expandedSnippets.Contains(rule.Id) ? "▼" : "▶")</span>
+                            <span>@rule.CobolReference &mdash; @rule.SourceFile</span>
+                        </div>
+                        @if (_expandedSnippets.Contains(rule.Id))
+                        {
+                            <div class="rule-code-block">
+                                @if (!string.IsNullOrWhiteSpace(rule.CodeSnippet))
+                                {
+                                    <pre>@rule.CodeSnippet</pre>
+                                }
+                                else
+                                {
+                                    <div class="rule-no-snippet">No code snippet captured for this rule. Re-analyse the file to extract snippets.</div>
+                                }
+                            </div>
+                        }
                         @if (!string.IsNullOrWhiteSpace(rule.MigrationNotes))
                         {
                             <div class="rule-migration">Migration: @rule.MigrationNotes</div>
@@ -393,6 +410,9 @@
     private string _filterFile = "";
     private string _filterConfidence = "";
     private string _filterDecision = "";
+
+    // Tracks which rule IDs have their code snippet expanded
+    private readonly HashSet<string> _expandedSnippets = [];
 
     private bool CanAnalyse =>
         _stagedPaths.Count > 0 &&
@@ -649,6 +669,13 @@
             ? level : ConfidenceLevel.High;
     }
 
+    private void ToggleSnippet(string ruleId)
+    {
+        if (!_expandedSnippets.Add(ruleId))
+            _expandedSnippets.Remove(ruleId);
+        StateHasChanged();
+    }
+
     private void NavigateToGenerate()
     {
         if (_session is not null)
@@ -689,6 +716,7 @@
         _cts?.Cancel();
         _timerCts?.Cancel();
         _progressRows = [];
+        _expandedSnippets.Clear();
         _globalError = null;
         _elapsedDisplay = "";
         _activeModel = "";
